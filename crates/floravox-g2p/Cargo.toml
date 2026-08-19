@@ -1,0 +1,19 @@
+[package]
+name = "floravox-g2p"
+description = "Hybrid grapheme-to-phoneme: memory-mapped FST lexicons with pluggable OOV fallback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+fst.workspace = true
+memmap2 = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

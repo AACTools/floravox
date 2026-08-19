@@ -1,0 +1,10 @@
+/target
+Cargo.lock.bak
+*.wav
+*.onnx
+*.onnx.json
+!tests/models/**
+models/
+__pycache__/
+.venv/
+*.fst

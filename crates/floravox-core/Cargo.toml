@@ -1,0 +1,30 @@
+[package]
+name = "floravox-core"
+description = "ONNX synthesis orchestration: duration folding, sample-accurate event timeline, streaming API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = ["onnx"]
+# ONNX inference via the `ort` crate. Disable for a frontend-only build
+# (timeline math, SSML, estimation fallback) with zero native deps.
+onnx = ["dep:ort", "dep:ndarray"]
+
+[dependencies]
+floravox-ssml.workspace = true
+floravox-g2p.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ort = { workspace = true, optional = true }
+ndarray = { version = "0.16", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

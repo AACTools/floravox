@@ -1,0 +1,18 @@
+[package]
+name = "floravox-ssml"
+description = "Zero-copy SSML parser with byte- and char-exact source span tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+quick-xml.workspace = true
+
+[dev-dependencies]
+serde_json = "1"
+
+[lints]
+workspace = true

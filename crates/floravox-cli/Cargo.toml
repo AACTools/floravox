@@ -1,0 +1,27 @@
+[package]
+name = "floravox-cli"
+description = "Diagnostic CLI for the floravox TTS engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "floravox"
+path = "src/main.rs"
+
+[features]
+default = ["onnx"]
+onnx = ["floravox-core/onnx"]
+
+[dependencies]
+floravox-core.workspace = true
+floravox-ssml.workspace = true
+floravox-g2p.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
