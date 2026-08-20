@@ -197,6 +197,16 @@ impl<D: AsRef<[u8]>> FstLexicon<D> {
         self.map.len()
     }
 
+    /// Copy into an in-memory lexicon (detaches memory maps).
+    #[must_use]
+    pub fn to_mem(&self) -> FstLexicon<Vec<u8>> {
+        FstLexicon {
+            map: fst::Map::new(self.map.as_fst().as_bytes().to_vec())
+                .expect("copy of a valid fst"),
+            blob: self.blob.as_ref().to_vec(),
+        }
+    }
+
     /// True when the lexicon has no entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -567,6 +577,21 @@ mod tests {
         assert_eq!(lex.len(), 2);
         assert_eq!(lex.lookup("world").unwrap()[1], "ɜː");
         assert!(lex.lookup("nope").is_none());
+    }
+
+    #[test]
+    fn to_mem_detaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let stem = dir.path().join("m");
+        LexiconWriter::new(&stem)
+            .write(vec![("hello".into(), "h ə".into())])
+            .unwrap();
+        let mmap = MmapLexicon::open(&stem).unwrap();
+        // Remove the files: the mmap still works, but to_mem survives
+        // detachment semantics regardless.
+        std::fs::remove_file(stem.with_extension("fst")).unwrap();
+        let mem = mmap.to_mem();
+        assert_eq!(mem.lookup("hello").unwrap(), vec!["h", "ə"]);
     }
 
     #[test]
