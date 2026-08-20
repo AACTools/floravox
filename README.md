@@ -9,7 +9,7 @@ It grew out of [VoiceGarden](https://github.com/AACTools), a foundational speech
 The good offline voices (piper, MMS, Matcha, Kokoro) ship as ONNX model files that take phonemes as input, not text. To build a product on top of them you need three extra pieces, and writing them yourself is months of work:
 
 1. Text to phonemes (G2P). English is built in. German and twelve other languages work with bundles from [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons).
-2. SSML. Screen readers and AAC apps send `<break>`, `<prosody rate>`, `<mark>` and friends. floravox parses them and tracks byte and character positions that point back into your original text.
+2. SSML. Screen readers and AAC apps send `<break>`, `<prosody rate>`, `<mark>` and friends. floravox parses them and tracks byte and character positions that point back into your original text. The full element reference is in [docs/ssml.md](docs/ssml.md).
 3. Word timings that are measured, not guessed. Reading apps highlight the word being spoken as it plays. Most engines estimate timings from word length, and those estimates land roughly 100 to 300 ms off, which listeners notice. floravox uses the real numbers.
 
 ## How the timings work
