@@ -151,7 +151,7 @@ checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
 name = "floravox-cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "floravox-core",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "floravox-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "floravox-g2p",
@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "floravox-g2p"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "fst",
  "memmap2",
@@ -187,7 +187,7 @@ dependencies = [
 
 [[package]]
 name = "floravox-ssml"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "quick-xml",
  "serde_json",
