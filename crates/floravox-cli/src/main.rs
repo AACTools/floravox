@@ -104,6 +104,8 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut text: Option<String> = None;
     let mut text_file: Option<String> = None;
     let mut lexicon_stem: Option<String> = None;
+    let mut byt5_encoder: Option<String> = None;
+    let mut byt5_decoder: Option<String> = None;
     let mut out_wav = "out.wav".to_string();
     let mut out_events = "events.json".to_string();
     let mut i = 0;
@@ -113,6 +115,8 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             "--text" => text = args.get(i + 1).cloned(),
             "--file" => text_file = args.get(i + 1).cloned(),
             "--lexicon" => lexicon_stem = args.get(i + 1).cloned(),
+            "--byt5-encoder" => byt5_encoder = args.get(i + 1).cloned(),
+            "--byt5-decoder" => byt5_decoder = args.get(i + 1).cloned(),
             "--out" => out_wav = args.get(i + 1).cloned().unwrap_or(out_wav),
             "--events" => out_events = args.get(i + 1).cloned().unwrap_or(out_events),
             other => bail!("unknown synth flag {other:?}"),
@@ -131,21 +135,33 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     #[cfg(feature = "onnx")]
     {
         // Lexicon-backed phonemizer when a stem is given; empty lexicon
-        // (everything spelled out by the fallback) otherwise.
+        // otherwise. OOV duty: ByT5 when a model pair is given, chained
+        // down to letter-name spelling.
+        if byt5_encoder.is_some() != byt5_decoder.is_some() {
+            bail!("--byt5-encoder and --byt5-decoder go together");
+        }
+        let rule = floravox_g2p::RuleFallback::default();
+        let fallback: Box<dyn floravox_g2p::OovFallback + Send> =
+            match (&byt5_encoder, &byt5_decoder) {
+                (Some(enc), Some(dec)) => {
+                    let byt5 = floravox_g2p::Byt5G2p::load(enc, dec)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!("byt5 fallback: {} + {}", enc, dec);
+                    Box::new(floravox_g2p::ChainedFallback(byt5, rule))
+                }
+                _ => Box::new(rule),
+            };
         let g2p: Box<dyn floravox_g2p::TokenPhonemizer + Send> =
             match &lexicon_stem {
                 Some(stem) => {
                     let lexicon = floravox_g2p::MmapLexicon::open(stem)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                     println!("lexicon: {stem}.fst/.pho ({} entries)", lexicon.len());
-                    Box::new(floravox_g2p::LexiconPhonemizer::new(
-                        lexicon,
-                        floravox_g2p::RuleFallback::default(),
-                    ))
+                    Box::new(floravox_g2p::LexiconPhonemizer::new(lexicon, fallback))
                 }
                 None => Box::new(floravox_g2p::LexiconPhonemizer::new(
                     floravox_g2p::FstLexicon::from_rows(Vec::new())?,
-                    floravox_g2p::RuleFallback::default(),
+                    fallback,
                 )),
             };
         let cached = floravox_g2p::CachedPhonemizer::new(g2p, 1024);
@@ -186,7 +202,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     }
     #[cfg(not(feature = "onnx"))]
     {
-        let _ = (model_path, input, out_wav, out_events, lexicon_stem);
+        let _ = (model_path, input, out_wav, out_events, lexicon_stem, byt5_encoder, byt5_decoder);
         bail!("floravox-cli was built without the `onnx` feature");
     }
 }

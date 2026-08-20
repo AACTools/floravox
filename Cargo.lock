@@ -139,6 +139,7 @@ version = "0.1.0"
 dependencies = [
  "fst",
  "memmap2",
+ "ort",
  "tempfile",
 ]
 

@@ -67,9 +67,24 @@ cargo run -p floravox-cli -- synth --model voice.onnx --lexicon en_US \
 
 ARPABET conversion targets the piper/espeak en_US inventory: `AH0`/`ER0`
 reduce to `ə`/`ɚ`, stress digits become standalone `ˈ`/`ˌ` symbols, and
-`CH`/`JH` map to `tʃ`/`dʒ`. Words absent from the lexicon fall back to
-letter-name spelling (`zzzq` → "zee zee zee cue") until a neural OOV
-engine lands behind the same trait.
+`CH`/`JH` map to `tʃ`/`dʒ`.
+
+## OOV: ByT5 neural fallback
+
+Words missing from the lexicon can be phonemized by a ByT5 G2P model
+(byte-level T5 — no tokenizer to keep in sync). Export a Hugging Face
+checkpoint with optimum and pass the pair to `synth`:
+
+```console
+optimum-cli export onnx --model <hf-byt5-g2p-checkpoint> byt5/
+cargo run -p floravox-cli -- synth --model voice.onnx --lexicon en_US \
+  --byt5-encoder byt5/encoder_model.onnx --byt5-decoder byt5/decoder_model.onnx \
+  --text '<speak>Hello world</speak>' --out out.wav --events events.json
+```
+
+Decoding is greedy with an EOS stop; the engine implements
+`floravox_g2p::OovFallback` and chains down to letter-name spelling when
+it produces nothing (`floravox_g2p::ChainedFallback`).
 
 ## Quick start
 
@@ -113,7 +128,9 @@ Dispatcher index-mark recipe.
 - [x] ort synthesis: measured word/mark timings, break splicing, estimation
       fallback, adaptive input styles (`scales` and split inputs)
 - [x] End-to-end verified against `en_US-lessac-low` (16 kHz)
-- [ ] ByT5 / Phonetisaurus OOV fallback engines
+- [x] ByT5 ONNX OOV fallback engine (`floravox-g2p` `onnx` feature,
+      greedy byte-level decoding, `ChainedFallback` to spelling)
+- [ ] Phonetisaurus WFST OOV fallback
 - [ ] rust-tts-wrapper engine adapter
 - [ ] VoiceGarden-SPD module integration
 

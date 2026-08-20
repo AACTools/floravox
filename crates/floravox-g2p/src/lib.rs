@@ -6,9 +6,10 @@
 //!   crate (`CMUDict`, `WikiPron`, gruut extractions). On-disk lexicons are
 //!   memory-mapped (~0 resident RAM), lookups are sub-100 µs, footprints are
 //!   ~5–15 MB per language.
-//! * **Tier 2** — [`OovFallback`]: pluggable out-of-vocabulary strategy
-//!   (rule-based spelling fallback here; a Phonetisaurus WFST or a `ByT5` ONNX
-//!   engine slots in behind the same trait).
+//! * **Tier 2** — [`OovFallback`]: pluggable out-of-vocabulary strategy —
+//!   rule-based spelling fallback here, a [`ByT5`](byt5::Byt5G2p) ONNX
+//!   engine behind the `onnx` feature, or a Phonetisaurus WFST behind the
+//!   same trait.
 //!
 //! Wrap any phonemizer in a bounded [`CachedPhonemizer`] so repeated words
 //! (the common case in AAC and screen-reader workloads) cost one hash lookup.
@@ -43,7 +44,12 @@ use std::sync::Arc;
 
 pub mod ingest;
 
+#[cfg(feature = "onnx")]
+pub mod byt5;
+
 pub use ingest::{Ingested, SourceFormat};
+#[cfg(feature = "onnx")]
+pub use byt5::Byt5G2p;
 
 /// One pronunciation symbol (IPA-ish, model-specific alphabet).
 pub type Phoneme = String;
@@ -55,6 +61,8 @@ pub enum G2pError {
     Open(std::io::Error),
     /// Input data could not be compiled (unsorted keys, bad TSV, ...).
     Compile(String),
+    /// A neural OOV engine failed (model load or inference).
+    Inference(String),
 }
 
 impl fmt::Display for G2pError {
@@ -62,6 +70,7 @@ impl fmt::Display for G2pError {
         match self {
             Self::Open(e) => write!(f, "lexicon open failed: {e}"),
             Self::Compile(e) => write!(f, "lexicon compile failed: {e}"),
+            Self::Inference(e) => write!(f, "g2p inference failed: {e}"),
         }
     }
 }
@@ -249,6 +258,39 @@ fn append_ext(path: &Path, ext: &str) -> PathBuf {
 pub trait OovFallback {
     /// Pronounce an out-of-vocabulary word.
     fn fallback(&mut self, word: &str) -> Vec<Phoneme>;
+}
+
+impl<F: OovFallback + ?Sized> OovFallback for Box<F> {
+    fn fallback(&mut self, word: &str) -> Vec<Phoneme> {
+        (**self).fallback(word)
+    }
+}
+
+/// Try `A` first; when it produces nothing (unknown input, failed engine),
+/// fall back to `B`. Typical chain: neural engine → letter spelling.
+///
+/// ```
+/// use floravox_g2p::{ChainedFallback, OovFallback, RuleFallback};
+///
+/// struct Empty;
+/// impl OovFallback for Empty {
+///     fn fallback(&mut self, _word: &str) -> Vec<String> { Vec::new() }
+/// }
+///
+/// let mut chain = ChainedFallback(Empty, RuleFallback::default());
+/// assert!(!chain.fallback("zzzq").is_empty()); // spelled out by B
+/// ```
+pub struct ChainedFallback<A, B>(pub A, pub B);
+
+impl<A: OovFallback, B: OovFallback> OovFallback for ChainedFallback<A, B> {
+    fn fallback(&mut self, word: &str) -> Vec<Phoneme> {
+        let first = self.0.fallback(word);
+        if first.is_empty() {
+            self.1.fallback(word)
+        } else {
+            first
+        }
+    }
 }
 
 /// Letter-name spelling fallback: pronounces unknown words by "spelling"
