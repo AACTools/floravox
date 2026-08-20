@@ -14,6 +14,13 @@ default = ["onnx", "misaki", "uroman"]
 # ONNX inference via the `ort` crate. Disable for a frontend-only build
 # (timeline math, SSML, estimation fallback) with zero native deps.
 onnx = ["dep:ort", "dep:ndarray"]
+# Link onnxruntime at RUNTIME (onnxruntime.dll / libonnxruntime.so)
+# instead of embedding ort's static artifact. Windows integrators that
+# must run pre-1903 Win10 / Win7 use this + a CPU-only
+# onnxruntime.dll from the official ONNX Runtime release: ort's
+# prebuilt static artifacts all bundle the DirectML EP, whose
+# d3d12/DirectML imports raise the floor to Win10 1903+ (floravox#1).
+onnx-dynamic = ["onnx", "ort/load-dynamic"]
 # Document-level misaki G2P pre-pass (the phonemizer Kokoro was trained
 # with). MIT and fully self-contained; adds ~9 MB of embedded dictionary.
 misaki = ["floravox-g2p/misaki"]
