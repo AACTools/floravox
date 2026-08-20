@@ -273,7 +273,7 @@ impl SidecarConfig {
                         p.extension().and_then(|e| e.to_str()) == Some("json")
                             && p.file_stem()
                                 .and_then(|s| s.to_str())
-                                .is_some_and(|s| s.ends_with(".onnx"))
+                                .is_some_and(|s| s.to_ascii_lowercase().ends_with(".onnx"))
                     })
                     .collect();
                 if sidecars.len() == 1 {
