@@ -20,9 +20,7 @@ use std::io::Read;
 use floravox_g2p::{ingest, SourceFormat};
 
 fn usage_exit() -> ! {
-    eprintln!(
-        "usage: floravox-fst-compile [--format auto|cmudict|ipa-tsv|tsv] INPUT OUTPUT_STEM"
-    );
+    eprintln!("usage: floravox-fst-compile [--format auto|cmudict|ipa-tsv|tsv] INPUT OUTPUT_STEM");
     std::process::exit(2);
 }
 

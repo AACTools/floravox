@@ -24,8 +24,8 @@
 //! to `<word bytes>` phoneme string, split on whitespace.
 
 use crate::{G2pError, OovFallback, Phoneme};
-use ort::value::Tensor;
 use ort::session::Session;
+use ort::value::Tensor;
 
 /// `</s>` in `ByT5` vocabularies.
 const EOS: i64 = 1;
@@ -211,18 +211,12 @@ impl OovFallback for Byt5G2p {
 }
 
 /// Build an i64 tensor from (shape, data), mapping ort errors.
-fn tensor_i64(
-    shape: impl Into<Vec<i64>>,
-    data: Vec<i64>,
-) -> Result<Tensor<i64>, G2pError> {
+fn tensor_i64(shape: impl Into<Vec<i64>>, data: Vec<i64>) -> Result<Tensor<i64>, G2pError> {
     Tensor::from_array((shape.into(), data)).map_err(|e| G2pError::Inference(e.to_string()))
 }
 
 /// Build an f32 tensor from (shape, data), mapping ort errors.
-fn tensor_f32(
-    shape: impl Into<Vec<i64>>,
-    data: Vec<f32>,
-) -> Result<Tensor<f32>, G2pError> {
+fn tensor_f32(shape: impl Into<Vec<i64>>, data: Vec<f32>) -> Result<Tensor<f32>, G2pError> {
     Tensor::from_array((shape.into(), data)).map_err(|e| G2pError::Inference(e.to_string()))
 }
 

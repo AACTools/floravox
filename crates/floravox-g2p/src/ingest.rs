@@ -57,8 +57,7 @@ impl SourceFormat {
             } else if let Some((_, right)) = line.split_once('\t') {
                 // Unsegmented IPA (`WikiPron` style) has no spaces on the
                 // right-hand side; pre-segmented TSV phonemes do.
-                if !right.is_ascii() && !right.chars().any(char::is_whitespace)
-                {
+                if !right.is_ascii() && !right.chars().any(char::is_whitespace) {
                     ipa += 1;
                 } else {
                     other += 1;

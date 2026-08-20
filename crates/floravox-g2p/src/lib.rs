@@ -48,9 +48,9 @@ pub mod ingest;
 pub mod byt5;
 pub mod phonetisaurus;
 
-pub use ingest::{Ingested, SourceFormat};
 #[cfg(feature = "onnx")]
 pub use byt5::Byt5G2p;
+pub use ingest::{Ingested, SourceFormat};
 pub use phonetisaurus::PhonetisaurusG2p;
 
 /// One pronunciation symbol (IPA-ish, model-specific alphabet).
@@ -205,8 +205,7 @@ impl<D: AsRef<[u8]>> FstLexicon<D> {
     #[must_use]
     pub fn to_mem(&self) -> FstLexicon<Vec<u8>> {
         FstLexicon {
-            map: fst::Map::new(self.map.as_fst().as_bytes().to_vec())
-                .expect("copy of a valid fst"),
+            map: fst::Map::new(self.map.as_fst().as_bytes().to_vec()).expect("copy of a valid fst"),
             blob: self.blob.as_ref().to_vec(),
         }
     }

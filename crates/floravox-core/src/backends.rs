@@ -55,8 +55,11 @@ pub trait VoiceBackend: Send {
     /// # Errors
     ///
     /// Propagates ONNX session and tensor failures.
-    fn run(&mut self, ids: &[i64], length_scale: f32)
-        -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)>;
+    fn run(
+        &mut self,
+        ids: &[i64],
+        length_scale: f32,
+    ) -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)>;
 }
 
 /// End-to-end VITS (piper and MMS exports).
@@ -106,8 +109,16 @@ struct GraphNames {
 impl GraphNames {
     fn of(session: &ort::session::Session) -> Self {
         Self {
-            inputs: session.inputs().iter().map(|i| i.name().to_string()).collect(),
-            outputs: session.outputs().iter().map(|o| o.name().to_string()).collect(),
+            inputs: session
+                .inputs()
+                .iter()
+                .map(|i| i.name().to_string())
+                .collect(),
+            outputs: session
+                .outputs()
+                .iter()
+                .map(|o| o.name().to_string())
+                .collect(),
         }
     }
 
@@ -165,7 +176,9 @@ pub fn load_voice(path: impl AsRef<Path>) -> anyhow::Result<Box<dyn VoiceBackend
     if (names.has("input") || names.has("x"))
         && (names.has("input_lengths") || names.has("x_length"))
     {
-        return Ok(Box::new(VitsBackend::build(session, &onnx, &names, &sidecar)?));
+        return Ok(Box::new(VitsBackend::build(
+            session, &onnx, &names, &sidecar,
+        )?));
     }
 
     Err(anyhow!(
@@ -219,7 +232,8 @@ fn resolve_onnx(path: &Path) -> anyhow::Result<PathBuf> {
 /// Look for a vocoder next to the acoustic model.
 fn find_vocoder(acoustic: &Path) -> Option<PathBuf> {
     let dir = acoustic.parent()?;
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir).ok()?
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| {
@@ -260,8 +274,7 @@ impl SidecarConfig {
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|r| u32::try_from(r).ok());
             let inf = v.get("inference").cloned().unwrap_or_default();
-            let inf: InferenceSection =
-                serde_json::from_value(inf).unwrap_or_default();
+            let inf: InferenceSection = serde_json::from_value(inf).unwrap_or_default();
             cfg.noise_scale = inf.noise_scale;
             cfg.length_scale = inf.length_scale;
             cfg.noise_scale_w = inf.noise_scale_w;
@@ -299,10 +312,7 @@ fn tokens_txt_map(path: &Path) -> Option<HashMap<String, Vec<i64>>> {
 
 /// Embedded ONNX metadata (`sherpa`-style exports carry `sample_rate` etc.).
 fn session_metadata(session: &ort::session::Session, key: &str) -> Option<String> {
-    session
-        .metadata()
-        .ok()?
-        .custom(key)
+    session.metadata().ok()?.custom(key)
 }
 
 /// MMS-style VITS training config (`config.json` next to the model).
@@ -318,7 +328,10 @@ fn mms_config(path: &Path) -> Option<(u32, u32)> {
     }
     let text = std::fs::read_to_string(path.join("config.json")).ok()?;
     let cfg: Cfg = serde_json::from_str(&text).ok()?;
-    Some((cfg.data.sampling_rate?, cfg.data.hop_length.unwrap_or(DEFAULT_HOP)))
+    Some((
+        cfg.data.sampling_rate?,
+        cfg.data.hop_length.unwrap_or(DEFAULT_HOP),
+    ))
 }
 
 /// Count speakers from metadata / sidecar.
@@ -375,10 +388,7 @@ impl KokoroBackend {
         let names = GraphNames::of(&session);
         let sample_rate = sidecar
             .sample_rate
-            .or_else(|| {
-                session_metadata(&session, "sample_rate")
-                    .and_then(|v| v.parse().ok())
-            })
+            .or_else(|| session_metadata(&session, "sample_rate").and_then(|v| v.parse().ok()))
             .unwrap_or(24_000);
         let hop_length = sidecar.hop_length.unwrap_or(KOKORO_HOP);
 
@@ -402,7 +412,6 @@ impl KokoroBackend {
             style_dim2,
         })
     }
-
 }
 
 /// Length-conditioned style slice: `voices[(sid·dim0 + min(len,
@@ -459,11 +468,10 @@ impl VoiceBackend for KokoroBackend {
 
         let seq = i64::try_from(ids.len()).unwrap_or(i64::MAX);
         let tokens = ort::value::Tensor::from_array(([1_i64, seq], ids.to_vec()))?;
-        let style_tensor =
-            ort::value::Tensor::from_array((
-                vec![1_i64, i64::try_from(self.style_dim2).unwrap_or(256)],
-                style.to_vec(),
-            ))?;
+        let style_tensor = ort::value::Tensor::from_array((
+            vec![1_i64, i64::try_from(self.style_dim2).unwrap_or(256)],
+            style.to_vec(),
+        ))?;
         let speed_tensor = ort::value::Tensor::from_array(([1_i64], vec![speed]))?;
 
         let outputs = self.session.run(ort::inputs![
@@ -507,19 +515,17 @@ impl VitsBackend {
             )
         })?;
 
-        let (mms_rate, mms_hop) = mms_config(
-            onnx.parent().unwrap_or(Path::new(".")),
-        )
-        .unwrap_or((0, DEFAULT_HOP));
+        let (mms_rate, mms_hop) =
+            mms_config(onnx.parent().unwrap_or(Path::new("."))).unwrap_or((0, DEFAULT_HOP));
         let sample_rate = sidecar
             .sample_rate
-            .or_else(|| {
-                session_metadata(&session, "sample_rate")
-                    .and_then(|v| v.parse().ok())
-            })
+            .or_else(|| session_metadata(&session, "sample_rate").and_then(|v| v.parse().ok()))
             .or(if mms_rate > 0 { Some(mms_rate) } else { None })
             .unwrap_or(22_050);
-        let hop_length = sidecar.hop_length.unwrap_or(if mms_hop > 0 { mms_hop } else { DEFAULT_HOP });
+        let hop_length =
+            sidecar
+                .hop_length
+                .unwrap_or(if mms_hop > 0 { mms_hop } else { DEFAULT_HOP });
 
         let ids_name = if names.has("input") { "input" } else { "x" }.to_string();
         let length_name = if names.has("input_lengths") {
@@ -661,18 +667,13 @@ impl MatchaBackend {
                     .join("tokens.txt"),
             )
         });
-        let map = map.ok_or_else(|| anyhow!("matcha voice needs a tokens.txt or a phoneme_id_map"))?;
+        let map =
+            map.ok_or_else(|| anyhow!("matcha voice needs a tokens.txt or a phoneme_id_map"))?;
 
         let sample_rate = sidecar
             .sample_rate
-            .or_else(|| {
-                session_metadata(&vocoder, "sample_rate")
-                    .and_then(|v| v.parse().ok())
-            })
-            .or_else(|| {
-                session_metadata(&acoustic, "sample_rate")
-                    .and_then(|v| v.parse().ok())
-            })
+            .or_else(|| session_metadata(&vocoder, "sample_rate").and_then(|v| v.parse().ok()))
+            .or_else(|| session_metadata(&acoustic, "sample_rate").and_then(|v| v.parse().ok()))
             .unwrap_or(22_050);
         let hop_length = sidecar.hop_length.unwrap_or(DEFAULT_HOP);
         let speakers = session_metadata(&acoustic, "n_speakers")
@@ -697,7 +698,12 @@ impl MatchaBackend {
             config,
             ids_name: "x".into(),
             length_name: "x_length".into(),
-            vocoder_mel_name: if vnames.has("mel") { "mel" } else { "spectrogram" }.into(),
+            vocoder_mel_name: if vnames.has("mel") {
+                "mel"
+            } else {
+                "spectrogram"
+            }
+            .into(),
             vocoder_audio_name: if vnames.has("audio") { "audio" } else { "y" }.into(),
         })
     }
@@ -739,8 +745,7 @@ impl VoiceBackend for MatchaBackend {
         }
         let (mel_shape, mel_data) =
             mel.ok_or_else(|| anyhow!("matcha model produced no mel output"))?;
-        let mel_tensor =
-            ort::value::Tensor::from_array((mel_shape, mel_data))?;
+        let mel_tensor = ort::value::Tensor::from_array((mel_shape, mel_data))?;
         let voc_out = self.vocoder.run(ort::inputs![
             &self.vocoder_mel_name => mel_tensor
         ])?;
@@ -765,11 +770,7 @@ mod tests {
     #[test]
     fn tokens_txt_parses_space_and_case_folds() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("tokens.txt"),
-            "î 0\nÎ 0\nz 1\n  3\næ 39\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("tokens.txt"), "î 0\nÎ 0\nz 1\n  3\næ 39\n").unwrap();
         let map = tokens_txt_map(&dir.path().join("tokens.txt")).unwrap();
         assert_eq!(map["î"], vec![0]);
         assert_eq!(map["Î"], vec![0]); // case-folded duplicate
@@ -783,7 +784,6 @@ mod tests {
         std::fs::write(dir.path().join("tokens.txt"), "\n# comment\nzz\n").unwrap();
         assert!(tokens_txt_map(&dir.path().join("tokens.txt")).is_none());
     }
-
 
     #[test]
     fn resolve_onnx_direct_dir_and_stem() {
@@ -810,15 +810,27 @@ mod tests {
     #[test]
     fn style_slice_is_length_conditioned() {
         // 2 speakers × dim0=3 × dim2=2, values = flat row index.
-#[allow(clippy::cast_precision_loss)]
+        #[allow(clippy::cast_precision_loss)]
         let voices: Vec<f32> = (0..12).map(|i| i as f32).collect();
         // sid 0, len 0 → row 0 → [0, 1]; len 2 → row 2 → [4, 5]
-        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 0), Some(&[0.0, 1.0][..]));
-        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 2), Some(&[4.0, 5.0][..]));
+        assert_eq!(
+            kokoro_style_slice(&voices, 3, 2, 0, 0),
+            Some(&[0.0, 1.0][..])
+        );
+        assert_eq!(
+            kokoro_style_slice(&voices, 3, 2, 0, 2),
+            Some(&[4.0, 5.0][..])
+        );
         // len clamps to dim0-1
-        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 99), Some(&[4.0, 5.0][..]));
+        assert_eq!(
+            kokoro_style_slice(&voices, 3, 2, 0, 99),
+            Some(&[4.0, 5.0][..])
+        );
         // sid 1, len 1 → row 4 → [8, 9]
-        assert_eq!(kokoro_style_slice(&voices, 3, 2, 1, 1), Some(&[8.0, 9.0][..]));
+        assert_eq!(
+            kokoro_style_slice(&voices, 3, 2, 1, 1),
+            Some(&[8.0, 9.0][..])
+        );
         // sid out of range → None
         assert_eq!(kokoro_style_slice(&voices, 3, 2, 2, 0), None);
     }

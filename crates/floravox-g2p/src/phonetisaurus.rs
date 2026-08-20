@@ -154,12 +154,12 @@ fn parse_model(bytes: &[u8]) -> Result<ParsedModel, G2pError> {
         return Err(compile("only 'vector' FST types are supported".into()));
     }
     if r.string()? != "standard" {
-        return Err(compile("only 'standard' arcs (f32 weights) are supported".into()));
+        return Err(compile(
+            "only 'standard' arcs (f32 weights) are supported".into(),
+        ));
     }
     if r.i32()? != FST_VERSION {
-        return Err(compile(
-            "only `OpenFst` file version 2 is supported".into(),
-        ));
+        return Err(compile("only `OpenFst` file version 2 is supported".into()));
     }
     let flags = r.i32()?;
     if flags & !(FLAG_INPUT_SYMBOLS | FLAG_OUTPUT_SYMBOLS) != 0 {
@@ -246,7 +246,9 @@ fn parse_states(
                 _ => r.i64()?,
             };
             if !(0..numstates).contains(&ns) {
-                return Err(compile(format!("arc points outside the state space ({ns})")));
+                return Err(compile(format!(
+                    "arc points outside the state space ({ns})"
+                )));
             }
             arcs.push(Arc {
                 ilabel,
@@ -287,19 +289,27 @@ impl Reader<'_> {
     }
 
     fn i32(&mut self) -> Result<i32, G2pError> {
-        Ok(i32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(i32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
 
     fn i64(&mut self) -> Result<i64, G2pError> {
-        Ok(i64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(i64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
 
     fn u64(&mut self) -> Result<u64, G2pError> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
     }
 
     fn f32(&mut self) -> Result<f32, G2pError> {
-        Ok(f32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
+        Ok(f32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
     }
 
     fn string(&mut self) -> Result<String, G2pError> {
@@ -515,9 +525,7 @@ impl PhonetisaurusG2p {
         Some(
             labels
                 .iter()
-                .filter_map(|&id| {
-                    usize::try_from(id).ok().and_then(|i| self.phonemes.get(i))
-                })
+                .filter_map(|&id| usize::try_from(id).ok().and_then(|i| self.phonemes.get(i)))
                 .filter(|s| !s.is_empty() && **s != "_")
                 .flat_map(|s| s.split('|').map(str::to_owned))
                 .filter(|p| !p.is_empty())
@@ -617,7 +625,10 @@ fn pack(pos: usize, st: u32) -> u64 {
 
 /// Unpack a node key into `(position, state)`.
 fn unpack(node: u64) -> (usize, u32) {
-    (usize::try_from(node >> 32).unwrap_or(usize::MAX), node as u32)
+    (
+        usize::try_from(node >> 32).unwrap_or(usize::MAX),
+        node as u32,
+    )
 }
 
 impl OovFallback for PhonetisaurusG2p {
@@ -701,10 +712,7 @@ mod tests {
                 .find(|(fs, _)| *fs == s)
                 .map_or(f32::INFINITY, |(_, w)| *w);
             v.extend_from_slice(&fw.to_le_bytes());
-            let state_arcs: Vec<_> = arcs
-                .iter()
-                .filter(|(f, _, _, _, _)| *f == s)
-                .collect();
+            let state_arcs: Vec<_> = arcs.iter().filter(|(f, _, _, _, _)| *f == s).collect();
             v.extend_from_slice(&(state_arcs.len() as i64).to_le_bytes());
             for (_, il, ol, w, ns) in state_arcs {
                 v.extend_from_slice(&il.to_le_bytes());
@@ -730,11 +738,11 @@ mod tests {
         let bytes = write_fst(
             0,
             &[
-                (0, 3, 3, 0.1, 1), // H -> h
-                (1, 0, 0, 0.05, 2), // pure epsilon hop
-                (2, 4, 4, 0.2, 3), // I -> aɪ
+                (0, 3, 3, 0.1, 1),       // H -> h
+                (1, 0, 0, 0.05, 2),      // pure epsilon hop
+                (2, 4, 4, 0.2, 3),       // I -> aɪ
                 (0, 5, 5, hi_weight, 3), // HI -> haɪ (multi-char grapheme)
-                (1, 0, 0, 0.0, 1), // zero-weight epsilon self-loop
+                (1, 0, 0, 0.0, 1),       // zero-weight epsilon self-loop
             ],
             &[(3, 0.0)],
             false,
@@ -822,9 +830,7 @@ mod tests {
         assert!(parse_model(&[0u8; 8]).is_err());
         let mut good = write_fst(0, &[(0, 3, 3, 0.0, 1)], &[(1, 0.0)], false);
         good.truncate(good.len() - 3); // truncated
-        assert!(
-            PhonetisaurusG2p::from_parts(&good, GRAPHEMES, PHONEMES).is_err()
-        );
+        assert!(PhonetisaurusG2p::from_parts(&good, GRAPHEMES, PHONEMES).is_err());
     }
 
     #[test]

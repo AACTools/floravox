@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Default features (onnx) drive the full backend + ByT5 surface.
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # The g2p `onnx` feature is not in every dependency graph.
+      - name: Clippy (floravox-g2p onnx)
+        run: cargo clippy -p floravox-g2p --features onnx --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # ort fetches a prebuilt onnxruntime per platform; the tests
+      # themselves never touch a model file (pure planning/format code).
+      - name: Tests (default features)
+        run: cargo test --workspace
+      - name: Build CLI release smoke
+        run: cargo build -p floravox-cli --release
+
+  frontend-only:
+    # The no-ort build must keep compiling: it is the shape embedders
+    # (SSML tooling, timeline consumers) link against.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (no default features)
+        run: cargo test --workspace --no-default-features
+      - name: Clippy (no default features)
+        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings

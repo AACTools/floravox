@@ -95,7 +95,6 @@ pub struct ResolvedConfig {
     pub framing: ControlSymbols,
 }
 
-
 /// A block of audio with its absolute position in the utterance.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {

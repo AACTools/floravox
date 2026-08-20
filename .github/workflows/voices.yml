@@ -1,0 +1,179 @@
+name: Voice Matrix Live Tests
+
+on:
+  # Manual trigger only — downloads ~350 MB of models; would burn CI
+  # minutes on every push.
+  workflow_dispatch:
+  # Run on PRs that touch the pieces these tests exercise.
+  pull_request:
+    paths:
+      - "python/**"
+      - "crates/floravox-core/src/backends.rs"
+      - "crates/floravox-core/src/synth.rs"
+      - "crates/floravox-cli/**"
+      - ".github/workflows/voices.yml"
+
+jobs:
+  voices:
+    runs-on: ubuntu-latest
+    env:
+      MODELS: ${{ github.workspace }}/models
+      PATCHED_MATCHA: ${{ github.workspace }}/models/matcha-icefall-en_US-ljspeech/model-patched.onnx
+      PATCHED_MMS: ${{ github.workspace }}/models/vits-mms-fra/model-patched.onnx
+      PATCHED_KOKORO: ${{ github.workspace }}/models/kokoro/model-patched.onnx
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install python deps
+        run: python -m pip install onnx onnxruntime
+
+      - name: Syntax-check the python tooling
+        run: python -m py_compile python/add_durations_output.py python/validate_durations.py
+
+      - name: Cache voice models
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/models
+          key: voice-models-v1
+
+      - name: Download models
+        run: |
+          set -euxo pipefail
+          mkdir -p "$MODELS"
+          cd "$MODELS"
+          # Matcha acoustic + HiFi-GAN vocoder
+          if [ ! -d matcha-icefall-en_US-ljspeech ]; then
+            curl -sSL -o m.tar.bz2 \
+              https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/matcha-icefall-en_US-ljspeech.tar.bz2
+            tar xjf m.tar.bz2
+          fi
+          if [ ! -f hifigan_v2.onnx ]; then
+            curl -sSL -O \
+              https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx
+          fi
+          # The vocoder sits beside the acoustic model for auto-discovery.
+          cp -n hifigan_v2.onnx matcha-icefall-en_US-ljspeech/hifigan_v2.onnx || true
+          # MMS VITS (French)
+          if [ ! -d vits-mms-fra ]; then
+            curl -sSL -o mms.tar.bz2 \
+              https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-mms-fra.tar.bz2
+            tar xjf mms.tar.bz2
+          fi
+          # Kokoro en v0.19 (int8)
+          if [ ! -d kokoro ]; then
+            mkdir kokoro
+            curl -sSL -o kokoro.tar.bz2 \
+              https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-en-v0_19.tar.bz2
+            tar xjf kokoro.tar.bz2 -C kokoro --strip-components=1
+          fi
+          # Phonetisaurus CMUDict WFST (embedded symbol tables)
+          if [ ! -f phonetisaurus.fst ]; then
+            curl -sSL -o phonetisaurus.fst \
+              https://media.githubusercontent.com/media/AdolfVonKleist/phonetisaurus-downloads/master/models/cmudict-20170708.o8.fst
+          fi
+          ls -la "$MODELS"
+
+      - name: Patch + validate duration surgery (all families)
+        run: |
+          set -euxo pipefail
+          # Copy before patching so the model cache stays stock.
+          cp "$MODELS/matcha-icefall-en_US-ljspeech/model-steps-3.onnx" "$PATCHED_MATCHA"
+          python python/add_durations_output.py "$PATCHED_MATCHA" --validate
+          cp "$MODELS/vits-mms-fra/model.onnx" "$PATCHED_MMS"
+          python python/add_durations_output.py "$PATCHED_MMS" --validate
+          cp "$MODELS/kokoro/model.int8.onnx" "$PATCHED_KOKORO"
+          python python/add_durations_output.py "$PATCHED_KOKORO" --validate
+
+      - name: Synthesize — matcha (measured word + mark events)
+        run: |
+          set -euxo pipefail
+          mkdir -p "$MODELS/out"
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_MATCHA" \
+            --text '<speak>Hello <mark name="m1"/>world from matcha</speak>' \
+            --out "$MODELS/out/matcha.wav" --events "$MODELS/out/matcha.json"
+          python - "$MODELS/out/matcha.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          assert len(words) >= 4, f"expected >=4 word events, got {len(words)}"
+          assert all(not w["estimated"] for w in words), "matcha timings must be measured"
+          assert any(e["type"] == "mark_reached" and e.get("name") == "m1" for e in evs), "mark m1 missing"
+          samples = [w["sample_start"] for w in words]
+          assert samples == sorted(samples), "word boundaries not monotonic"
+          print("matcha OK:", [(w["text"], w["ms_start"]) for w in words])
+          EOF
+
+      - name: Synthesize — MMS (measured word events, auto-detected config)
+        run: |
+          set -euxo pipefail
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_MMS" \
+            --text '<speak>bonjour le monde</speak>' \
+            --out "$MODELS/out/mms.wav" --events "$MODELS/out/mms.json"
+          python - "$MODELS/out/mms.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          assert len(words) == 3, f"expected 3 word events, got {len(words)}"
+          assert all(not w["estimated"] for w in words), "mms timings must be measured"
+          print("mms OK:", [(w["text"], w["ms_start"]) for w in words])
+          EOF
+
+      - name: Synthesize — kokoro (phoneme overrides, break splice, rate)
+        run: |
+          set -euxo pipefail
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_KOKORO" \
+            --text '<speak><phoneme ph="H e l l o">hello</phoneme> <mark name="k1"/><phoneme ph="w o r l d">world</phoneme> <break time="200ms"/><phoneme ph="k o k o r o">kokoro</phoneme></speak>' \
+            --out "$MODELS/out/kokoro.wav" --events "$MODELS/out/kokoro.json"
+          python - "$MODELS/out/kokoro.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = {e["text"]: e for e in evs if e["type"] == "word_boundary"}
+          assert set(words) == {"hello", "world", "kokoro"}, sorted(words)
+          assert all(not w["estimated"] for w in words.values()), "kokoro timings must be measured"
+          brk = next(e for e in evs if e["type"] == "break_started")
+          # the break splices exactly at the previous word's end
+          assert brk["sample"] == words["world"]["sample_end"], (brk, words["world"])
+          assert any(e["type"] == "mark_reached" and e.get("name") == "k1" for e in evs)
+          print("kokoro OK:", {k: (v["ms_start"], v["ms_end"]) for k, v in words.items()})
+          EOF
+          # rate control: prosody fast (1.25x) must produce events too
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_KOKORO" \
+            --text '<speak><prosody rate="fast"><phoneme ph="H e l l o">hello</phoneme> <phoneme ph="w o r l d">world</phoneme></prosody></speak>' \
+            --out "$MODELS/out/kokoro-fast.wav" --events "$MODELS/out/kokoro-fast.json"
+          python - "$MODELS/out/kokoro-fast.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          assert len(words) == 2, words
+          end = max(w["sample_end"] for w in words)
+          assert end > 0
+          print("kokoro rate OK: last sample", end)
+          EOF
+
+      - name: Phonetisaurus real-model decode (env-gated test)
+        env:
+          PHONETISAURUS_MODEL: ${{ github.workspace }}/models/phonetisaurus.fst
+        run: cargo test -p floravox-g2p real_model -- --nocapture
+
+      - name: Phonetisaurus g2p CLI
+        run: |
+          set -euxo pipefail
+          out=$(cargo run -q -p floravox-cli -- g2p \
+            --phonetisaurus "$MODELS/phonetisaurus.fst" hello world)
+          echo "$out"
+          echo "$out" | grep -q "HH EH1 L OW0"
+          echo "$out" | grep -q "W ER1 L D"

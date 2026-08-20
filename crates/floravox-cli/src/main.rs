@@ -220,8 +220,7 @@ fn build_phonemizer(
         fallback = Box::new(floravox_g2p::ChainedFallback(byt5, fallback));
     }
     if let Some(stem) = phonetisaurus_stem {
-        let ph =
-            floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let ph = floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
         println!(
             "phonetisaurus fallback: {stem}.fst ({} states, {} arcs)",
             ph.num_states(),
@@ -271,8 +270,7 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
     if words.is_empty() {
         bail!("give at least one word");
     }
-    let model =
-        floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let model = floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!(
         "model: {} states, {} arcs",
         model.num_states(),
@@ -289,6 +287,7 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
 
 /// Minimal 16-bit PCM WAV writer (mono). Sample counts and lengths are
 /// bounded by real utterance sizes.
+#[cfg(feature = "onnx")]
 #[allow(
     clippy::too_many_lines,
     clippy::cast_possible_truncation,

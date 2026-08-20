@@ -22,18 +22,18 @@
 //! assert_eq!(fired.len(), 1);
 //! ```
 
-pub mod estimate;
-pub mod events;
 #[cfg(feature = "onnx")]
 pub mod backends;
+pub mod estimate;
+pub mod events;
 #[cfg(feature = "onnx")]
 pub mod synth;
 pub mod timeline;
 
-pub use events::{SynthesisEvent, WordTiming};
-pub use timeline::EventTimeline;
 #[cfg(feature = "onnx")]
 pub use backends::{load_voice, KokoroBackend, MatchaBackend, VitsBackend, VoiceBackend};
+pub use events::{SynthesisEvent, WordTiming};
+pub use timeline::EventTimeline;
 
 /// Fold a durations tensor (mel frames per phoneme-id) into sample-accurate
 /// word timings.
