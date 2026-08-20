@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme.workspace = true
 
 [features]
 default = ["onnx", "misaki"]
@@ -18,8 +19,8 @@ onnx = ["dep:ort", "dep:ndarray"]
 misaki = ["floravox-g2p/misaki"]
 
 [dependencies]
-floravox-ssml.workspace = true
-floravox-g2p.workspace = true
+floravox-ssml = { workspace = true }
+floravox-g2p = { workspace = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
