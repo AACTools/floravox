@@ -82,6 +82,80 @@ struct Arc {
     nextstate: u32,
 }
 
+/// One arc as written by [`write_model`]: `(ilabel, olabel, weight,
+/// nextstate)` with a 32-bit nextstate (the 16-byte encoding).
+pub type WrittenArc = (i32, i32, f32, i32);
+
+/// Serialize a model in the `OpenFst` v2 binary layout this module reads:
+/// embedded symbol tables (marker + name + counts + entries), then
+/// states with 16-byte arcs. Tables are `(symbol, id)` lists written in
+/// ascending id order; ids 0..2 are the `<eps>`/`|`/`_` convention.
+///
+/// # Errors
+///
+/// [`G2pError::Compile`] when table ids are not exactly 0..n.
+#[allow(clippy::similar_names)] // put_i32/put_i64/put_f32/put_str family
+pub fn write_model(
+    start: u32,
+    states: &[(Option<f32>, Vec<WrittenArc>)],
+    isyms: &[(String, i32)],
+    osyms: &[(String, i32)],
+    out: &mut Vec<u8>,
+) -> Result<(), G2pError> {
+    let bad_table = |t: &[(String, i32)]| {
+        t.iter()
+            .enumerate()
+            .any(|(i, (_, id))| i32::try_from(i).unwrap_or(-1) != *id)
+    };
+    if bad_table(isyms) || bad_table(osyms) {
+        return Err(G2pError::Compile(
+            "symbol tables must be dense, ascending, starting at 0".into(),
+        ));
+    }
+    let numarcs: u64 = states.iter().map(|(_, a)| a.len() as u64).sum();
+    let put_i32 = |v: &mut Vec<u8>, x: i32| v.extend_from_slice(&x.to_le_bytes());
+    let put_i64 = |v: &mut Vec<u8>, x: i64| v.extend_from_slice(&x.to_le_bytes());
+    let put_f32 = |v: &mut Vec<u8>, x: f32| v.extend_from_slice(&x.to_le_bytes());
+    let put_str = |v: &mut Vec<u8>, s: &str| {
+        put_i32(v, s.len() as i32);
+        v.extend_from_slice(s.as_bytes());
+    };
+    let put_table = |v: &mut Vec<u8>, name: &str, t: &[(String, i32)]| {
+        put_i32(v, 0x7EB2_FB74_i32); // table marker (observed on real models)
+        put_str(v, name);
+        let n = t.len() as i64;
+        put_i64(v, n);
+        put_i64(v, n);
+        for (sym, id) in t {
+            put_str(v, sym);
+            put_i64(v, i64::from(*id));
+        }
+    };
+
+    put_i32(out, FST_MAGIC);
+    put_str(out, "vector");
+    put_str(out, "standard");
+    put_i32(out, FST_VERSION);
+    put_i32(out, FLAG_INPUT_SYMBOLS | FLAG_OUTPUT_SYMBOLS);
+    out.extend_from_slice(&0x0000_0081_A542_0003_u64.to_le_bytes()); // properties
+    put_i64(out, i64::from(start));
+    put_i64(out, states.len() as i64);
+    put_i64(out, numarcs as i64);
+    put_table(out, "isyms", isyms);
+    put_table(out, "osyms", osyms);
+    for (final_weight, arcs) in states {
+        put_f32(out, final_weight.unwrap_or(f32::INFINITY));
+        put_i64(out, arcs.len() as i64);
+        for (il, ol, w, ns) in arcs {
+            put_i32(out, *il);
+            put_i32(out, *ol);
+            put_f32(out, *w);
+            put_i32(out, *ns);
+        }
+    }
+    Ok(())
+}
+
 /// Symbol tables embedded in (or loaded beside) a model.
 #[derive(Debug, Default, Clone)]
 pub struct SymbolTables {
@@ -480,26 +554,29 @@ impl PhonetisaurusG2p {
     /// emit without consuming. Words that fail on casing (a capital in a
     /// lower-cased table, or vice versa) are retried with the other case.
     #[must_use]
+    /// Casing cascade: the table's own case first (uppercase models get
+    /// uppercased input), then lowercase, then uppercase. Keeps uppercase
+    /// CMUDict-style models working while letting models trained on
+    /// lowercase lexicons (gruut) accept `Haus` via `haus`.
     pub fn phonemize(&self, word: &str) -> Option<Vec<Phoneme>> {
-        let cased = if self.uppercase {
+        let mut candidates: Vec<String> = Vec::with_capacity(3);
+        let primary = if self.uppercase {
             word.to_uppercase()
         } else {
             word.to_string()
         };
-        if let Some(found) = self.phonemize_cased(&cased) {
-            return Some(found);
+        candidates.push(primary.clone());
+        let lower = word.to_lowercase();
+        if lower != primary {
+            candidates.push(lower);
         }
-        // Casing retry: cheap (only OOV words reach this) and rescues
-        // sentence-initial capitals on lower-cased tables.
-        let flipped = if self.uppercase {
-            word.to_lowercase()
-        } else {
-            word.to_uppercase()
-        };
-        match flipped {
-            different if different != cased => self.phonemize_cased(&different),
-            _ => None,
+        let upper = word.to_uppercase();
+        if upper != primary && !candidates.contains(&upper) {
+            candidates.push(upper);
         }
+        candidates
+            .into_iter()
+            .find_map(|c| self.phonemize_cased(&c))
     }
 
     /// Transcribe an already-cased word through the search.
@@ -907,6 +984,52 @@ mod tests {
         assert_eq!(m.num_states(), 4);
         assert_eq!(m.num_arcs(), 3);
         assert_eq!(m.phonemize("HI").unwrap(), vec!["h", "aɪ"]);
+    }
+
+    #[test]
+    fn write_model_roundtrips_through_the_reader() {
+        // isyms/osyms: ids 0..2 reserved, then segments in id order.
+        let isyms: Vec<(String, i32)> = vec![
+            ("<eps>".into(), 0),
+            ("|".into(), 1),
+            ("_".into(), 2),
+            ("h|a".into(), 3),
+            ("l".into(), 4),
+            ("o".into(), 5),
+        ];
+        let osyms: Vec<(String, i32)> = vec![
+            ("<eps>".into(), 0),
+            ("|".into(), 1),
+            ("_".into(), 2),
+            ("h|a".into(), 3),
+            ("l".into(), 4),
+            ("o|ʊ".into(), 5),
+        ];
+        // start=0; 0 -(3,3,.1)-> 1 -(4,4,.1)-> 2 -(5,5,.1)-> 3(final)
+        let states = vec![
+            (None, vec![(3, 3, 0.1, 1)]),
+            (None, vec![(4, 4, 0.1, 2)]),
+            (None, vec![(5, 5, 0.1, 3)]),
+            (Some(0.0), vec![]),
+        ];
+        let mut bytes = Vec::new();
+        write_model(0, &states, &isyms, &osyms, &mut bytes).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trained.fst");
+        std::fs::write(&path, &bytes).unwrap();
+        let model = PhonetisaurusG2p::open(&path).unwrap();
+        // "ha" via the compound grapheme, then "l", "o"; outputs split
+        // compounds back apart.
+        assert_eq!(
+            model.phonemize("halo").unwrap(),
+            vec!["h", "a", "l", "o", "ʊ"]
+        );
+        // lowercase table accepts capitals via the cascade
+        assert_eq!(
+            model.phonemize("Halo").unwrap(),
+            vec!["h", "a", "l", "o", "ʊ"]
+        );
     }
 
     #[test]
