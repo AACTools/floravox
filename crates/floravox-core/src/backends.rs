@@ -143,6 +143,8 @@ impl GraphNames {
 pub fn load_voice(path: impl AsRef<Path>) -> anyhow::Result<Box<dyn VoiceBackend>> {
     let onnx = resolve_onnx(path.as_ref())?;
     let session = ort::session::Session::builder()?
+        .with_intra_threads(intra_threads())
+        .map_err(|e| anyhow!("thread config: {e}"))?
         .commit_from_file(&onnx)
         .with_context(|| format!("loading {}", onnx.display()))?;
     let names = GraphNames::of(&session);
@@ -197,6 +199,18 @@ fn is_vocoder_name(path: &Path) -> bool {
         let n = n.to_string_lossy().to_ascii_lowercase();
         n.contains("hifigan") || n.contains("vocoder") || n.contains("vocos")
     })
+}
+
+/// Intra-op thread count for ONNX sessions. Default 2: VITS decode
+/// gains nothing from more threads on small models while the per-thread
+/// arena grows resident memory substantially. Override with
+/// `FLORAVOX_ONNX_THREADS`.
+fn intra_threads() -> usize {
+    std::env::var("FLORAVOX_ONNX_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(2)
+        .max(1)
 }
 
 /// Resolve a user path to a concrete .onnx file (acoustic model).
@@ -675,6 +689,8 @@ impl MatchaBackend {
         sidecar: &SidecarConfig,
     ) -> anyhow::Result<Self> {
         let vocoder = ort::session::Session::builder()?
+            .with_intra_threads(intra_threads())
+            .map_err(|e| anyhow!("thread config: {e}"))?
             .commit_from_file(vocoder_path)
             .with_context(|| format!("loading vocoder {}", vocoder_path.display()))?;
         let vnames = GraphNames::of(&vocoder);
