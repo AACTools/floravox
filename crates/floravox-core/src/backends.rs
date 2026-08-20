@@ -444,8 +444,8 @@ impl KokoroBackend {
             .with_context(|| format!("reading {}", voices_path.display()))?;
         let voices = {
             let mut floats = Vec::with_capacity(voices.len() / 4);
-            for chunk in voices.chunks_exact(4) {
-                floats.push(f32::from_le_bytes(chunk.try_into().expect("4 bytes")));
+            for chunk in voices.as_chunks::<4>().0 {
+                floats.push(f32::from_le_bytes(*chunk));
             }
             floats
         };
