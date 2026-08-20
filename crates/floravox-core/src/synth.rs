@@ -21,6 +21,11 @@ use std::sync::{Arc, Mutex};
 /// Samples per streamed audio chunk.
 const CHUNK_SAMPLES: usize = 8192;
 
+/// Audio chunks buffered between the synthesis worker and the consumer
+/// (8 × 8192 samples ≈ 4 s at 16 kHz): enough to ride out one inference
+/// without underrunning, small enough to bound ahead-of-playback work.
+const CHANNEL_CHUNKS: usize = 8;
+
 /// Symbols piper-style models reserve for control ids.
 const BOS: &str = "^";
 const EOS: &str = "$";
@@ -292,7 +297,11 @@ impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
             plan_document(&inner.backend.config().phoneme_id_map, input)?
         };
         let inner = Arc::clone(&self.inner);
-        let (audio_tx, audio_rx) = mpsc::channel();
+        // Bounded audio channel: with a real-time consumer, the worker
+        // synthesizes at most CHANNEL_CHUNKS ahead of playback instead of
+        // buffering (and arena-growing for) the whole utterance. Dropping
+        // the receiver still cancels; sends just block until then.
+        let (audio_tx, audio_rx) = mpsc::sync_channel(CHANNEL_CHUNKS);
         let (event_tx, event_rx) = mpsc::channel();
 
         std::thread::spawn(move || {
@@ -335,18 +344,30 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
                 if words.is_empty() {
                     continue;
                 }
-                let rate = words[0].prosody.rate.unwrap_or(1.0);
-                match plan.last_mut() {
-                    Some(PlanItem::Words {
-                        words: w, rate: r, ..
-                    }) if (*r - rate).abs() < 1e-6 => {
-                        w.extend(words.iter().cloned());
+                // Split at sentence-final punctuation so each sentence
+                // becomes its own inference pass: audio for sentence N
+                // streams out while sentence N+1 is still synthesizing
+                // (and the ORT arena sees bounded pass shapes). Explicit
+                // <s>/<p> tags already produced their own segments.
+                for chunk in split_sentences(words) {
+                    let rate = chunk[0].prosody.rate.unwrap_or(1.0);
+                    match plan.last_mut() {
+                        Some(PlanItem::Words {
+                            words: w, rate: r, ..
+                        }) if (*r - rate).abs() < 1e-6 => {
+                            w.extend(chunk);
+                        }
+                        _ => plan.push(PlanItem::Words {
+                            words: chunk,
+                            rate,
+                            marks: take_marks(&mut pending_marks),
+                        }),
                     }
-                    _ => plan.push(PlanItem::Words {
-                        words: words.clone(),
-                        rate,
-                        marks: take_marks(&mut pending_marks),
-                    }),
+                    if let Some(PlanItem::Words { words, .. }) = plan.last() {
+                        if words.last().is_some_and(|w| is_sentence_final(&w.text)) {
+                            plan.push(PlanItem::SentenceEnd);
+                        }
+                    }
                 }
             }
             Segment::Break { ms, .. } => {
@@ -359,7 +380,9 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
             Segment::Mark { name, .. } => pending_marks.push(name.clone()),
             Segment::SentenceEnd { .. } => {
                 close_words(&mut plan);
-                plan.push(PlanItem::SentenceEnd);
+                if !matches!(plan.last(), Some(PlanItem::SentenceEnd)) {
+                    plan.push(PlanItem::SentenceEnd);
+                }
             }
             Segment::ParagraphEnd { .. } => {
                 close_words(&mut plan);
@@ -372,6 +395,45 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
         push_or_attach(&mut plan, pending_marks);
     }
     Ok(plan)
+}
+
+/// Split a word run at sentence-final words (`.`, `!`, `?`, `…`,
+/// CJK/Armenian/Thai terminals). The terminator stays with its sentence.
+fn split_sentences(words: &[WordSpan]) -> Vec<Vec<WordSpan>> {
+    let mut out: Vec<Vec<WordSpan>> = Vec::new();
+    let mut cur: Vec<WordSpan> = Vec::new();
+    for w in words {
+        cur.push(w.clone());
+        if is_sentence_final(&w.text) {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(Vec::new());
+    }
+    out
+}
+
+/// True when `text` ends with a sentence-terminal character.
+fn is_sentence_final(text: &str) -> bool {
+    text.trim_end().chars().next_back().is_some_and(|c| {
+        matches!(
+            c,
+            '.' | '!'
+                | '?'
+                | '\u{2026}'
+                | '\u{3002}'
+                | '\u{ff01}'
+                | '\u{ff1f}'
+                | '\u{0589}'
+                | '\u{17d4}'
+                | '\u{17d1}'
+                | '\u{104b}'
+        )
+    })
 }
 
 /// End the current open Words item so the next one starts fresh.
@@ -399,7 +461,7 @@ fn synth_worker<G: TokenPhonemizer>(
     g2p: &mut G,
     mut pre_pass: Option<&mut Box<dyn DocumentPhonemizer>>,
     plan: &[PlanItem],
-    audio_tx: &mpsc::Sender<AudioChunk>,
+    audio_tx: &mpsc::SyncSender<AudioChunk>,
     event_tx: &mpsc::Sender<SynthesisEvent>,
 ) -> anyhow::Result<()> {
     let rate = model.config().sample_rate;
@@ -737,6 +799,38 @@ mod tests {
     }
 
     #[test]
+    fn plan_splits_plain_text_into_sentence_passes() {
+        // Streaming: each sentence-final word ends a Words item (its own
+        // inference pass) with a SentenceEnd between, so audio for
+        // sentence N streams while N+1 synthesizes.
+        let plan = plan_document(&map(), "Eins hier. Zwei dort! Drei ueberall? Kein Ende").unwrap();
+        let words_items: Vec<&Vec<floravox_ssml::WordSpan>> = plan
+            .iter()
+            .filter_map(|p| match p {
+                PlanItem::Words { words, .. } => Some(words),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words_items.len(), 4, "3 sentence + trailing run");
+        assert!(words_items[0].last().is_some_and(|w| w.text.ends_with('.')));
+        let ends = plan
+            .iter()
+            .filter(|p| matches!(p, PlanItem::SentenceEnd))
+            .count();
+        assert_eq!(ends, 3);
+    }
+
+    #[test]
+    fn explicit_s_tags_do_not_double_sentence_ends() {
+        let plan = plan_document(&map(), "<s>Eins.</s><s>Zwei.</s>").unwrap();
+        let ends = plan
+            .iter()
+            .filter(|p| matches!(p, PlanItem::SentenceEnd))
+            .count();
+        assert_eq!(ends, 2, "one per </s>, not doubled");
+    }
+
+    #[test]
     fn plan_splits_on_rate_change() {
         let plan = plan_document(
             &map(),
@@ -900,7 +994,7 @@ mod tests {
 
         let mut backend = FakeBackend::new(map());
         let plan = plan_document(&map(), "hello world").unwrap();
-        let (audio_tx, audio_rx) = mpsc::channel();
+        let (audio_tx, audio_rx) = mpsc::sync_channel(CHANNEL_CHUNKS);
         let (event_tx, event_rx) = mpsc::channel();
         let mut pre: Box<dyn DocumentPhonemizer> = Box::new(Fixed);
         synth_worker(
