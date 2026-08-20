@@ -61,9 +61,9 @@ proportional estimator and events are flagged `estimated: true`.
 | Crate            | Purpose                                                   |
 |------------------|-----------------------------------------------------------|
 | `floravox-ssml`  | quick-xml parser, span tracker, tag handlers               |
-| `floravox-g2p`   | mmap'd FST lexicons, LRU cache, OOV fallback trait, ingest |
-| `floravox-core`  | ort synthesis, duration folding, `EventTimeline`, events   |
-| `floravox-cli`   | `floravox synth` / `floravox timeline` diagnostics         |
+| `floravox-g2p`   | mmap'd FST lexicons, LRU cache, OOV fallback chain, ingest |
+| `floravox-core`  | voice backends, duration folding, `EventTimeline`, events  |
+| `floravox-cli`   | `floravox synth` / `g2p` / `timeline` diagnostics          |
 
 ## Building a lexicon
 
@@ -139,6 +139,58 @@ is inferred from the grapheme table. Note the output alphabet is whatever
 the model was trained on (ARPABET for CMUDict models) — pair the model
 with a voice that speaks that alphabet.
 
+The `g2p` subcommand also runs the full production stack when both a
+lexicon and a WFST are given (lexicon → Phonetisaurus → spelling):
+
+```console
+cargo run -p floravox-cli -- g2p --lexicon en_US \
+  --phonetisaurus cmudict-20170708.o8.fst hello zzzq
+```
+
+## Accuracy evaluation
+
+`python/` ships two audit tools:
+
+- **`eval_timings.py`** — scores synthesized WAVs against signal energy:
+  break edges must sit at silence, first/last word boundaries must match
+  audible onset/offset, fluent boundaries should land in energy dips, and
+  it reports what the proportional-estimate fallback *would* have said.
+  Current results (patched voices, measured timings): breaks land exactly
+  at their silence edges, inter-word boundaries sit in dips (kokoro
+  median energy ratio 0.14), trailing silence tracks within ~5 ms — and
+  the estimator fallback would have been 94–308 ms off (median) for the
+  same utterances. Known caveat: kokoro emits ~640 ms of leading
+  near-silence that gets attributed to the first word's start; MMS
+  front-loads ~128 ms. UIs that highlight from the first word's start
+  should account for leading silence until trimmed.
+- **`audit_g2p.py`** — compares the G2P stack's output against
+  `espeak-ng --ipa` (the phonemizer piper voices were trained with).
+  Current status: 17% exact symbol match, median edit distance 2. The
+  divergences are systematic, not random — diphthong splitting
+  (`eɪ` vs espeak's `e ɪ`), stress placement (vowel vs syllable onset),
+  function-word reductions in CMUDict — so **validating against a real
+  voice's `phoneme_id_map` (the model's actual inventory) is the open
+  item before trusting end-to-end English phonemization**. SSML
+  `<phoneme>` overrides bypass all of this.
+
+## Voice registry compatibility
+
+The [sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts-models)
+registry (1,760 models) breaks down against floravox as:
+
+| Registry family | Count | Drivable | Measured timings |
+|---|---|---|---|
+| mms | 1138 | ✅ | ✅ |
+| vits (piper/coqui/…) | 599 | ✅ | ✅ |
+| matcha | 5 | ✅ | ✅ |
+| kokoro | 4 | ✅ | ✅ |
+| kitten / pocket / supertonic / zipvoice | 14 | ❌ (LM/flow models, no duration tensor) | — |
+
+Registry consumption (download, verify, list, language routing) belongs
+in rust-tts-wrapper; floravox stays a synthesis engine that takes local
+files. The gating factor for *correct* non-English synthesis is
+per-language G2P (below).
+
 ## Quick start
 
 ```console
@@ -177,10 +229,12 @@ Dispatcher index-mark recipe.
 - [x] SSML parsing with exact spans (entities, `<sub>`, `<phoneme>`, marks)
 - [x] FST lexicon format + compiler (`floravox-fst-compile`) + LRU cache
 - [x] Lexicon data ingestion: CMUDict / IPA-TSV (WikiPron, gruut) converters
-- [x] Duration graph surgery + validation (`python/`)
+- [x] Duration graph surgery + validation (`python/`) for all supported
+      families
 - [x] ort synthesis: measured word/mark timings, break splicing, estimation
       fallback, adaptive input styles (`scales` and split inputs)
-- [x] End-to-end verified against `en_US-lessac-low` (16 kHz)
+- [x] End-to-end verified against `en_US-lessac-low` (16 kHz), matcha-ljspeech,
+      vits-mms-fra, kokoro-en-v0.19
 - [x] ByT5 ONNX OOV fallback engine (`floravox-g2p` `onnx` feature,
       greedy byte-level decoding, `ChainedFallback` to spelling)
 - [x] Phonetisaurus WFST OOV fallback (clean-room OpenFst reader +
@@ -189,7 +243,20 @@ Dispatcher index-mark recipe.
 - [x] Multi-family voices: `VoiceBackend` trait with piper/MMS VITS,
       Matcha+vocoder, and Kokoro backends (family, tensor names, config
       auto-detected; all validated live with measured timings)
-- [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch)
+- [x] CI: fast checks every push (fmt/clippy/3-platform tests) + live
+      voice-matrix workflow against real downloaded models
+- [ ] **Per-language G2P** — the English stack (CMUDict + ARPABET→IPA +
+      phonetisaurus) serves ~165 English voices; German (53), French (29),
+      Polish (27), Dutch (25) and the rest of the ~1,746 drivable voices
+      need per-language lexicons/WFSTs (gruut MIT lexicons and WikiPron +
+      phonetisaurus training are the intended sources — the `ingest`
+      module and `OovFallback` chain are ready for them). MMS voices want
+      per-language *character* frontends (transliteration-style), which is
+      simpler than phonemization.
+- [ ] G2P symbol-inventory validation against real voices'
+      `phoneme_id_map`s (see Accuracy evaluation)
+- [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch, tracking
+      floravox v0.4.0) + sherpa-onnx-tts-models registry routing
 - [ ] VoiceGarden-SPD module integration
 
 ## Licensing

@@ -65,7 +65,7 @@ impl SourceFormat {
             } else {
                 other += 1;
             }
-            if cmudict + ipa + other >= 2000 {
+            if cmudict + ipa + other >= 100_000 {
                 break;
             }
         }
@@ -353,10 +353,14 @@ fn line_is_cmudict(line: &str) -> bool {
         return false;
     };
     let word = strip_variant(word);
+    // Word shape is loose (case-insensitive, apostrophes, hyphens,
+    // periods, digits): the decisive signature is the ARPABET phones,
+    // and cmudict master begins with 2000+ `'bout`-style lowercase
+    // entries that a strict uppercase check would reject.
     if word.is_empty()
         || !word
             .chars()
-            .all(|c| c.is_ascii_uppercase() || c == '\'' || c == '-' || c == '.')
+            .all(|c| c.is_ascii_alphanumeric() || c == '\'' || c == '-' || c == '.')
     {
         return false;
     }
@@ -455,6 +459,19 @@ NOTABWORD
             SourceFormat::detect("hello\th ə l o u\nworld\tw ɜː l d\n"),
             SourceFormat::Tsv
         );
+    }
+
+    #[test]
+    fn detect_cmudict_master_layout() {
+        // cmudict master begins with 2000+ `'bout`-style entries
+        // (single-space separated, lowercase after the apostrophe);
+        // detection must not fall through to TSV on the leading sample.
+        let text = "'bout B AW1 T\n'cause K AH0 Z\n".repeat(1200)
+            + "HELLO HH AH0 L OW1\nWORLD W ER1 L D\n";
+        assert_eq!(SourceFormat::detect(&text), SourceFormat::CmuDict);
+        let ing = parse(&text, SourceFormat::CmuDict);
+        assert_eq!(ing.rows.len(), 2402);
+        assert_eq!(ing.rows[0], ("'bout".into(), "b ˈ aʊ t".into()));
     }
 
     #[test]

@@ -246,6 +246,7 @@ fn build_phonemizer(
 /// required.
 fn cmd_g2p(args: &[String]) -> Result<()> {
     let mut phonetisaurus_stem: Option<String> = None;
+    let mut lexicon_stem: Option<String> = None;
     let mut words: Vec<String> = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -257,6 +258,13 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
                 }
                 i += 2;
             }
+            "--lexicon" => {
+                lexicon_stem = args.get(i + 1).cloned();
+                if lexicon_stem.is_none() {
+                    bail!("--lexicon needs a stem (stem.fst + stem.pho)");
+                }
+                i += 2;
+            }
             other if other.starts_with("--") => bail!("unknown g2p flag {other:?}"),
             other => {
                 words.push(other.to_string());
@@ -264,12 +272,36 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
             }
         }
     }
-    let Some(stem) = &phonetisaurus_stem else {
-        bail!("g2p requires --phonetisaurus STEM (model.fst + tables)");
-    };
     if words.is_empty() {
         bail!("give at least one word");
     }
+
+    // Full production stack when both are given (lexicon hit = in-vocab;
+    // miss = phonetisaurus, else letter spelling); bare --phonetisaurus
+    // queries the WFST alone.
+    if let (Some(stem), Some(lex)) = (&phonetisaurus_stem, &lexicon_stem) {
+        let model =
+            floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let states = model.num_states();
+        let fallback = floravox_g2p::ChainedFallback(model, floravox_g2p::RuleFallback::default());
+        let lexicon = floravox_g2p::MmapLexicon::open(lex).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut g2p = floravox_g2p::LexiconPhonemizer::new(lexicon, fallback);
+        eprintln!(
+            "stack: lexicon ({} entries) + phonetisaurus ({} states) + spelling",
+            g2p.lexicon_len(),
+            states
+        );
+        for word in &words {
+            let in_lexicon = g2p.lexicon_len() > 0;
+            let _ = in_lexicon;
+            println!("{word}\t{}", g2p.phonemize_word(word).join(" "));
+        }
+        return Ok(());
+    }
+
+    let Some(stem) = &phonetisaurus_stem else {
+        bail!("g2p requires --phonetisaurus STEM (model.fst + tables)");
+    };
     let model = floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!(
         "model: {} states, {} arcs",
