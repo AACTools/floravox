@@ -112,6 +112,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut byt5_encoder: Option<String> = None;
     let mut byt5_decoder: Option<String> = None;
     let mut misaki: Option<String> = None;
+    let mut chars = false;
     let mut out_wav = "out.wav".to_string();
     let mut out_events = "events.json".to_string();
     let mut i = 0;
@@ -124,6 +125,11 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             "--phonetisaurus" => phonetisaurus_stem = args.get(i + 1).cloned(),
             "--byt5-encoder" => byt5_encoder = args.get(i + 1).cloned(),
             "--byt5-decoder" => byt5_decoder = args.get(i + 1).cloned(),
+            "--chars" => {
+                chars = true;
+                i += 1;
+                continue;
+            }
             "--misaki" => {
                 let lang = args.get(i + 1).map(|s| s.to_ascii_lowercase());
                 match lang.as_deref() {
@@ -182,6 +188,12 @@ fn cmd_synth(args: &[String]) -> Result<()> {
         if misaki.is_some() {
             bail!("floravox-cli was built without the misaki feature");
         }
+        if chars {
+            synth = synth.with_document_phonemizer(Box::new(floravox_core::synth::CharFrontend {
+                lowercase: true,
+            }));
+            println!("frontend: characters (lowercased)");
+        }
         let (samples, events, rate) = synth.synthesize(&input)?;
         write_wav(&out_wav, &samples, rate)?;
         let events_json: Vec<serde_json::Value> = events
@@ -217,6 +229,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             out_wav,
             out_events,
             misaki,
+            chars,
             lexicon_stem,
             phonetisaurus_stem,
             byt5_encoder,

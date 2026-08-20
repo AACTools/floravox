@@ -132,6 +132,36 @@ pub trait DocumentPhonemizer: Send {
     fn assign_phonemes(&mut self, words: &mut [WordSpan]);
 }
 
+/// [`DocumentPhonemizer`] that assigns each character of each word as
+/// its own symbol, for voices trained on romanized text rather than
+/// phonemes (MMS and friends: every MMS voice's `tokens.txt` is a
+/// per-language character inventory). Symbol resolution in `build_ids`
+/// maps the characters through the voice's own table, and the
+/// per-symbol pad insertion gives MMS's char-pad-char framing.
+pub struct CharFrontend {
+    /// Lowercase input first (character inventories are mostly lowercase).
+    pub lowercase: bool,
+}
+
+impl DocumentPhonemizer for CharFrontend {
+    fn assign_phonemes(&mut self, words: &mut [WordSpan]) {
+        for w in words {
+            if w.phonemes.is_some() || w.say_as == floravox_ssml::SayAs::Characters {
+                continue;
+            }
+            let text = if self.lowercase {
+                w.spoken.to_lowercase()
+            } else {
+                w.spoken.clone()
+            };
+            let chars: Vec<String> = text.chars().map(|c| c.to_string()).collect();
+            if !chars.is_empty() {
+                w.phonemes = Some(chars);
+            }
+        }
+    }
+}
+
 /// [`DocumentPhonemizer`] backed by [`floravox_g2p::MisakiG2p`] (feature
 /// `misaki`) — the phonemizer Kokoro voices were trained with.
 #[cfg(feature = "misaki")]
@@ -793,6 +823,39 @@ mod tests {
             let n = usize::try_from(d.iter().sum::<i64>()).unwrap_or(0) * 256;
             Ok((vec![0.0; n], Some(d)))
         }
+    }
+
+    #[test]
+    fn char_frontend_assigns_per_character() {
+        use floravox_ssml::Prosody;
+        let mk = |spoken: &str| WordSpan {
+            text: spoken.into(),
+            spoken: spoken.into(),
+            char_span: 0..spoken.len(),
+            byte_span: 0..spoken.len(),
+            phonemes: None,
+            prosody: Prosody::default(),
+            say_as: floravox_ssml::SayAs::None,
+            voice: None,
+        };
+        let mut words = vec![mk("Bonjour"), mk("le")];
+        CharFrontend { lowercase: true }.assign_phonemes(&mut words);
+        assert_eq!(
+            words[0].phonemes,
+            Some(
+                ["b", "o", "n", "j", "o", "u", "r"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            words[1].phonemes,
+            Some(["l", "e"].map(String::from).to_vec())
+        );
+        // existing phonemes (SSML overrides) are left alone
+        words[0].phonemes = Some(vec!["x".into()]);
+        CharFrontend { lowercase: true }.assign_phonemes(&mut words);
+        assert_eq!(words[0].phonemes, Some(vec!["x".into()]));
     }
 
     #[test]

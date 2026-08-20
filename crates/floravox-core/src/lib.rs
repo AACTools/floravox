@@ -33,10 +33,10 @@ pub mod timeline;
 #[cfg(feature = "onnx")]
 pub use backends::{load_voice, KokoroBackend, MatchaBackend, VitsBackend, VoiceBackend};
 pub use events::{SynthesisEvent, WordTiming};
-#[cfg(feature = "onnx")]
-pub use synth::DocumentPhonemizer;
 #[cfg(all(feature = "onnx", feature = "misaki"))]
 pub use synth::MisakiPrePass;
+#[cfg(feature = "onnx")]
+pub use synth::{CharFrontend, DocumentPhonemizer};
 pub use timeline::EventTimeline;
 
 /// Fold a durations tensor (mel frames per phoneme-id) into sample-accurate

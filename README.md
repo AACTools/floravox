@@ -95,7 +95,16 @@ The crate's optional espeak fallback is switched off because it would link GPL c
 
 ### Other languages
 
-Non-English voices use lexicon bundles from [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons). The important fact: gruut, the source of those lexicons, is the phonemizer piper's non-English voices were trained with, so its symbols line up with the voices. Tested on German: 236,000 symbols sampled against the piper German voice, none failed to resolve.
+Non-English piper voices use lexicon bundles from [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons). The lexicons come from gruut, the phonemizer those voices were trained with, so the symbols line up; tested on German, 236,000 sampled symbols, none failed to resolve.
+
+MMS voices (1,100+ languages) take romanized characters rather than phonemes, so they need no lexicon at all:
+
+```console
+cargo run -p floravox-cli -- synth --model mms-voice.onnx --chars \
+  --text '<speak>bonjour le monde</speak>' --out out.wav --events events.json
+```
+
+`--chars` lowercases the text and feeds each character through the voice's own `tokens.txt` (all characters of the test sentence resolve; timings stay measured). Non-Latin scripts need romanization first; porting [uroman](https://github.com/isi-nlp/uroman) (Apache-2.0) is the planned follow-up.
 
 ```console
 python python/gruut2tsv.py lexicon.db de_DE.tsv
