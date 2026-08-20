@@ -161,7 +161,12 @@ Against the [sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts
 - [x] CI on every push, plus a live voice-matrix workflow that downloads real models and checks measured events
 - [x] Published on crates.io at 0.5.1
 - [x] C ABI crate (`floravox-capi`) for non-Rust consumers
-- [ ] More languages beyond gruut's thirteen (per-language Phonetisaurus WFSTs trained on the published lexicons; ByT5 where no lexicon exists)
+- [x] Per-language Phonetisaurus training on the published lexicons
+      (`floravox-train-phonetisaurus`: EM M2M alignment + n-gram WFST;
+      German reference 93.6% exact / PER 1.4% on held-out words; models
+      ship in the voicegarden-lexicons bundles with metrics in the
+      manifest)
+- [ ] Languages beyond gruut's thirteen (ByT5 where no lexicon exists)
 - [ ] rust-tts-wrapper engine adapter (branch `floravox-engine` exists, tracks an older floravox and needs a bump)
 - [ ] VoiceGarden-SPD module integration
 
