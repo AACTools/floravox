@@ -98,6 +98,12 @@ pub struct ResolvedConfig {
     pub uses_scales: bool,
     /// Sequence framing (control symbols) the family expects.
     pub framing: ControlSymbols,
+    /// The voice's token table is a character inventory (MMS-style
+    /// `frontend=characters` voices) rather than a phoneme map: single
+    /// characters, no BOS/EOS markers, no multi-symbol phonemes. Callers
+    /// without an explicit frontend choice should use
+    /// [`CharFrontend`] for these.
+    pub is_char_table: bool,
 }
 
 /// A block of audio with its absolute position in the utterance.
@@ -205,7 +211,7 @@ enum PlanItem {
     Words {
         words: Vec<WordSpan>,
         rate: f32,
-        marks: Vec<String>,
+        marks: Vec<(String, i64)>,
     },
     /// An explicit pause.
     Break { ms: u64 },
@@ -334,9 +340,9 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
     let _ = map;
     let doc = parse_ssml(input)?;
     let mut plan: Vec<PlanItem> = Vec::new();
-    let mut pending_marks: Vec<String> = Vec::new();
+    let mut pending_marks: Vec<(String, i64)> = Vec::new();
 
-    let take_marks = |pending: &mut Vec<String>| std::mem::take(pending);
+    let take_marks = |pending: &mut Vec<(String, i64)>| std::mem::take(pending);
 
     for seg in &doc.segments {
         match seg {
@@ -373,7 +379,9 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
                 }
                 plan.push(PlanItem::Break { ms: u64::from(*ms) });
             }
-            Segment::Mark { name, .. } => pending_marks.push(name.clone()),
+            Segment::Mark { name, char_pos, .. } => {
+                pending_marks.push((name.clone(), i64::try_from(*char_pos).unwrap_or(-1)));
+            }
             Segment::SentenceEnd { .. } => {
                 close_words(&mut plan);
                 if !matches!(plan.last(), Some(PlanItem::SentenceEnd)) {
@@ -493,7 +501,7 @@ fn close_words(_plan: &mut Vec<PlanItem>) {
 }
 
 /// Attach marks to the last item (or a synthetic empty one).
-fn push_or_attach(plan: &mut Vec<PlanItem>, marks: Vec<String>) {
+fn push_or_attach(plan: &mut Vec<PlanItem>, marks: Vec<(String, i64)>) {
     match plan.last_mut() {
         Some(PlanItem::Words { marks: m, .. }) => m.extend(marks),
         _ => plan.push(PlanItem::Words {
@@ -580,12 +588,13 @@ fn synth_worker<G: TokenPhonemizer>(
                 };
                 if words.is_empty() {
                     // Marks with no following speech fire at current offset.
-                    for name in marks {
+                    for (name, char_offset) in marks {
                         event_tx
                             .send(SynthesisEvent::MarkReached {
                                 name: name.clone(),
                                 sample: offset,
                                 ms: offset * 1000 / u64::from(rate),
+                                char_offset: *char_offset,
                             })
                             .ok();
                     }
@@ -607,7 +616,7 @@ fn synth_worker<G: TokenPhonemizer>(
                 let d_ok = durations.as_ref().is_some_and(|d| d.len() == ids.len());
 
                 // Word timings (measured or estimated).
-                let timings: Vec<WordTiming> = match &durations {
+                let mut timings: Vec<WordTiming> = match &durations {
                     Some(d) if d_ok => {
                         let samples = fold_word_timings(d, &groups, hop);
                         words
@@ -639,16 +648,41 @@ fn synth_worker<G: TokenPhonemizer>(
                         .collect(),
                 };
 
+                // Leading-silence trim: models that emit a long quiet
+                // stretch before the first phoneme (kokoro: ~640 ms)
+                // would attribute it to the first word, firing
+                // first-word highlighting early. Shift the first word's
+                // start forward to the first audible sample when the
+                // gap is large (>= 200 ms) and measured.
+                if !timings.is_empty() {
+                    let t0 = &mut timings[0];
+                    let gap_samples = t0.sample_start.saturating_sub(offset);
+                    if gap_samples >= u64::from(rate) / 5 {
+                        #[allow(clippy::cast_possible_truncation, clippy::useless_conversion)]
+                        let span = (t0.sample_start.saturating_sub(offset)).min(audio.len() as u64)
+                            as usize;
+                        let cut = first_audible_offset(&audio, span, rate);
+                        if cut > 0 {
+                            let new_start = t0.sample_start + u64::from(cut);
+                            if new_start < t0.sample_end {
+                                t0.sample_start = new_start;
+                                t0.ms_start = new_start * 1000 / u64::from(rate);
+                            }
+                        }
+                    }
+                }
+
                 // Marks fire at the unit's first word start.
                 let mark_sample = durations.as_ref().map_or(offset, |d| {
                     offset + sample_at_id_index(d, groups[0].start, hop)
                 });
-                for name in marks {
+                for (name, char_offset) in marks {
                     event_tx
                         .send(SynthesisEvent::MarkReached {
                             name: name.clone(),
                             sample: mark_sample,
                             ms: mark_sample * 1000 / u64::from(rate),
+                            char_offset: *char_offset,
                         })
                         .ok();
                 }
@@ -733,6 +767,32 @@ fn resolve_phoneme_ids<'a>(map: &'a HashMap<String, Vec<i64>>, sym: &str) -> Vec
         return Vec::new();
     }
     out
+}
+
+/// Samples of leading silence in `audio[..span]`, counting from 0:
+/// advances while 10-ms blocks stay under 2% of the block-peak RMS.
+/// Returns 0 when no significant leading silence exists.
+fn first_audible_offset(audio: &[f32], span: usize, rate: u32) -> u32 {
+    let win = (rate as usize / 100).max(1); // 10 ms
+    if span <= win || audio.is_empty() {
+        return 0;
+    }
+    let peak = audio
+        .iter()
+        .take(span)
+        .fold(0.0_f32, |m, &s| m.max(s.abs()));
+    let thresh = peak * 0.02;
+    let mut pos = 0usize;
+    while pos + win <= span {
+        let block = &audio[pos..pos + win];
+        #[allow(clippy::cast_precision_loss)]
+        let rms = (block.iter().map(|s| s * s).sum::<f32>() / block.len() as f32).sqrt();
+        if rms > thresh {
+            break;
+        }
+        pos += win;
+    }
+    u32::try_from(pos).unwrap_or(0)
 }
 
 /// Build the phoneme-id sequence for a word run.
@@ -836,7 +896,7 @@ mod tests {
         assert!(has_break);
         // the mark attaches in front of the break
         let attached = plan.iter().any(|p| match p {
-            PlanItem::Words { marks, .. } => marks.iter().any(|m| m == "m"),
+            PlanItem::Words { marks, .. } => marks.iter().any(|(m, _)| m == "m"),
             _ => false,
         });
         assert!(attached);
@@ -1007,6 +1067,7 @@ mod tests {
                     has_durations: true,
                     uses_scales: false,
                     framing: ControlSymbols::piper(),
+                    is_char_table: false,
                 },
             }
         }

@@ -21,6 +21,9 @@ pub enum SynthesisEvent {
         sample: u64,
         /// Same position in milliseconds.
         ms: u64,
+        /// Character offset of the `<mark>` tag in the source input
+        /// (-1 when unknown).
+        char_offset: i64,
     },
     /// A `<break>` pause starts.
     BreakStarted {

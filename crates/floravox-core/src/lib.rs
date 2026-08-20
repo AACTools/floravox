@@ -16,7 +16,7 @@
 //! use floravox_core::{SynthesisEvent, EventTimeline};
 //!
 //! let mut timeline = EventTimeline::new();
-//! timeline.push(22050, SynthesisEvent::MarkReached { name: "m1".into(), sample: 22050, ms: 1000 });
+//! timeline.push(22050, SynthesisEvent::MarkReached { name: "m1".into(), sample: 22050, ms: 1000, char_offset: -1 });
 //! // Playback thread has written 44100 samples:
 //! let fired = timeline.drain_until(44100);
 //! assert_eq!(fired.len(), 1);

@@ -223,6 +223,30 @@ fn is_vocoder_name(path: &Path) -> bool {
     })
 }
 
+/// Heuristic: is this symbol map a character inventory (MMS-style)
+/// rather than a phoneme map? Character tables are dominated by single
+/// characters, lack piper's BOS/EOS markers, and carry no multi-char
+/// phonemes.
+fn looks_like_char_table(map: &HashMap<String, Vec<i64>>) -> bool {
+    let mut symbols: Vec<&String> = map.keys().collect();
+    symbols.sort_unstable();
+    if symbols.len() < 20 || symbols.len() > 300 {
+        return false; // phoneme maps run 70-250 but need markers; chars similar — markers decide
+    }
+    let bos = symbols.iter().any(|s| s.as_str() == "^");
+    let eos = symbols.iter().any(|s| s.as_str() == "$");
+    if bos && eos {
+        return false; // piper-style phoneme table
+    }
+    // multi-char phonemes (diphthongs etc.) => phoneme table
+    if symbols.iter().any(|s| s.chars().count() > 2) {
+        return false;
+    }
+    // predominantly single-character symbols
+    let single = symbols.iter().filter(|s| s.chars().count() == 1).count();
+    single * 10 >= symbols.len() * 8
+}
+
 /// Intra-op thread count for ONNX sessions. Default 2: VITS decode
 /// gains nothing from more threads on small models while the per-thread
 /// arena grows resident memory substantially. Override with
@@ -460,6 +484,7 @@ impl KokoroBackend {
             has_durations: names.has("durations"),
             uses_scales: false,
             framing: ControlSymbols::kokoro(),
+            is_char_table: false,
         };
         Ok(Self {
             session,
@@ -599,6 +624,7 @@ impl VitsBackend {
         let config = ResolvedConfig {
             sample_rate,
             hop_length,
+            is_char_table: looks_like_char_table(&map),
             phoneme_id_map: map,
             noise_scale: sidecar.noise_scale.unwrap_or(0.667),
             length_scale: sidecar.length_scale.unwrap_or(1.0),
@@ -742,6 +768,7 @@ impl MatchaBackend {
         let config = ResolvedConfig {
             sample_rate,
             hop_length,
+            is_char_table: looks_like_char_table(&map),
             phoneme_id_map: map,
             noise_scale: sidecar.noise_scale.unwrap_or(0.667),
             length_scale: sidecar.length_scale.unwrap_or(1.0),

@@ -91,6 +91,7 @@ mod tests {
         tl.push_event(word("b", 100, 200));
         tl.push_event(word("a", 0, 100));
         tl.push_event(SynthesisEvent::MarkReached {
+            char_offset: -1,
             name: "m".into(),
             sample: 150,
             ms: 7,
