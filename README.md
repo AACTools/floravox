@@ -39,9 +39,37 @@ proportional estimator and events are flagged `estimated: true`.
 | Crate            | Purpose                                                   |
 |------------------|-----------------------------------------------------------|
 | `floravox-ssml`  | quick-xml parser, span tracker, tag handlers               |
-| `floravox-g2p`   | mmap'd FST lexicons, LRU cache, OOV fallback trait         |
+| `floravox-g2p`   | mmap'd FST lexicons, LRU cache, OOV fallback trait, ingest |
 | `floravox-core`  | ort synthesis, duration folding, `EventTimeline`, events   |
 | `floravox-cli`   | `floravox synth` / `floravox timeline` diagnostics         |
+
+## Building a lexicon
+
+`floravox-fst-compile` ingests three source formats (auto-detected, or
+pinned with `--format`):
+
+| Format     | Shape                                    | Sources                          |
+|------------|------------------------------------------|----------------------------------|
+| `cmudict`  | `WORD  P HH R AH1 N`                     | CMUDict (ARPABET → IPA)          |
+| `ipa-tsv`  | `word\thəˈloʊ` (unsegmented IPA)         | WikiPron downloads, gruut dumps  |
+| `tsv`      | `word\tph1 ph2 ph3` (pre-segmented)      | hand-maintained lists            |
+
+```console
+# CMUDict (BSD-style, cmusphinx distribution):
+curl -L -o cmudict.dict \
+  https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict
+cargo run -p floravox-g2p --bin floravox-fst-compile -- cmudict.dict en_US
+
+# Then:
+cargo run -p floravox-cli -- synth --model voice.onnx --lexicon en_US \
+  --text '<speak>Hello world</speak>' --out out.wav --events events.json
+```
+
+ARPABET conversion targets the piper/espeak en_US inventory: `AH0`/`ER0`
+reduce to `ə`/`ɚ`, stress digits become standalone `ˈ`/`ˌ` symbols, and
+`CH`/`JH` map to `tʃ`/`dʒ`. Words absent from the lexicon fall back to
+letter-name spelling (`zzzq` → "zee zee zee cue") until a neural OOV
+engine lands behind the same trait.
 
 ## Quick start
 
@@ -52,7 +80,7 @@ python python/add_durations_output.py voice.onnx --validate
 
 # Synthesize with events:
 cargo run -p floravox-cli -- synth \
-  --model voice.onnx \
+  --model voice.onnx --lexicon en_US \
   --text '<speak>Hello <mark name="m1"/>world<break time="250ms"/>done</speak>' \
   --out out.wav --events events.json
 ```
@@ -80,11 +108,11 @@ Dispatcher index-mark recipe.
 
 - [x] SSML parsing with exact spans (entities, `<sub>`, `<phoneme>`, marks)
 - [x] FST lexicon format + compiler (`floravox-fst-compile`) + LRU cache
+- [x] Lexicon data ingestion: CMUDict / IPA-TSV (WikiPron, gruut) converters
 - [x] Duration graph surgery + validation (`python/`)
 - [x] ort synthesis: measured word/mark timings, break splicing, estimation
       fallback, adaptive input styles (`scales` and split inputs)
 - [x] End-to-end verified against `en_US-lessac-low` (16 kHz)
-- [ ] Real lexicon data ingestion (CMUDict / gruut extraction)
 - [ ] ByT5 / Phonetisaurus OOV fallback engines
 - [ ] rust-tts-wrapper engine adapter
 - [ ] VoiceGarden-SPD module integration
