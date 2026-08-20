@@ -537,6 +537,10 @@ fn synth_worker<G: TokenPhonemizer>(
 /// Precomposed symbols espeak-style inventories spell differently.
 const SUBST: &[(&str, &str)] = &[("ɝ", "ɜ˞")];
 
+/// ASCII homoglyphs some sources emit where IPA letters are meant
+/// (`g` vs `ɡ` U+0261 — gruut lexicons do this).
+const HOMOGLYPHS: &[(char, char)] = &[('g', 'ɡ')];
+
 fn resolve_phoneme_ids<'a>(map: &'a HashMap<String, Vec<i64>>, sym: &str) -> Vec<&'a Vec<i64>> {
     if let Some(ids) = map.get(sym) {
         return vec![ids];
@@ -554,10 +558,25 @@ fn resolve_phoneme_ids<'a>(map: &'a HashMap<String, Vec<i64>>, sym: &str) -> Vec
         if matches!(ch, '\u{0361}' | '\u{035C}') {
             continue; // tie bars: the parts carry the phoneme
         }
-        match map.get(ch.encode_utf8(&mut [0u8; 4])) {
-            Some(ids) => out.push(ids),
-            None => return Vec::new(),
+        let mut buf = [0u8; 4];
+        let key = ch.encode_utf8(&mut buf);
+        if let Some(ids) = map.get(key) {
+            out.push(ids);
+            continue;
         }
+        // ASCII homoglyph retry (g -> ɡ), then combining marks the
+        // voice doesn't carry (diacritics like the non-syllabic breve
+        // in `aɪ̯`) are dropped rather than failing the whole symbol.
+        if let Some((_, to)) = HOMOGLYPHS.iter().find(|(from, _)| *from == ch) {
+            if let Some(ids) = map.get(to.encode_utf8(&mut [0u8; 4])) {
+                out.push(ids);
+                continue;
+            }
+        }
+        if !ch.is_alphabetic() && !ch.is_numeric() {
+            continue;
+        }
+        return Vec::new();
     }
     out
 }
@@ -712,6 +731,27 @@ mod tests {
         assert_eq!(ids(resolve_phoneme_ids(&m, "ɝ")), vec![11, 12]); // substitution
         assert_eq!(ids(resolve_phoneme_ids(&m, "ɜː")), vec![11, 13]); // length mark
         assert!(resolve_phoneme_ids(&m, "x").is_empty()); // truly unknown
+    }
+
+    #[test]
+    fn resolve_handles_homoglyphs_and_loose_diacritics() {
+        // gruut lexicon shapes against a piper-style inventory.
+        let m: HashMap<String, Vec<i64>> = [
+            ("ɡ", vec![1]),
+            ("a", vec![2]),
+            ("ː", vec![3]),
+            ("ɪ", vec![4]),
+            ("t", vec![5]),
+            ("s", vec![6]),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let ids = |v: Vec<&Vec<i64>>| v.into_iter().flatten().copied().collect::<Vec<i64>>();
+        assert_eq!(ids(resolve_phoneme_ids(&m, "g")), vec![1]); // ASCII homoglyph
+        assert_eq!(ids(resolve_phoneme_ids(&m, "aɪ̯")), vec![2, 4]); // breve dropped
+        assert_eq!(ids(resolve_phoneme_ids(&m, "t͡s")), vec![5, 6]); // tie bar
+        assert_eq!(ids(resolve_phoneme_ids(&m, "aː")), vec![2, 3]); // length
     }
 
     /// Fake backend for worker-pipeline tests: silence audio with

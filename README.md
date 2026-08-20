@@ -63,7 +63,21 @@ proportional estimator and events are flagged `estimated: true`.
 
 ## Building a lexicon
 
-`floravox-fst-compile` ingests three source formats (auto-detected, or
+The **gruut path** is the proven non-English source: piper's non-English
+voices were *trained* with gruut, so its MIT lexicons (277k entries for
+German alone, ~20 languages) map onto those voices' inventories with
+**zero dropped symbols** after floravox's resolution rules:
+
+```console
+# gruut-lang-* packages are on PyPI (MIT); lexicons are sqlite inside:
+python python/gruut2tsv.py lexicon.db de_DE.tsv
+cargo run -p floravox-g2p --bin floravox-fst-compile -- de_DE.tsv de_DE
+cargo run -p floravox-cli -- synth --model de_DE-thorsten.onnx \
+  --lexicon de_DE --text '<speak>Guten Tag</speak>' \
+  --out out.wav --events events.json
+```
+
+`floravox-fst-compile` also ingests the raw formats (auto-detected, or
 pinned with `--format`):
 
 | Format     | Shape                                    | Sources                          |
@@ -279,15 +293,21 @@ Dispatcher index-mark recipe.
       kokoro) + CMUDict/phonetisaurus chain (100% coverage on piper after
       the compound-symbol resolution fix — was 80% with diphthongs
       silently dropped)
-- [ ] **Per-language G2P beyond English** — German (53 voices), French
-      (29), Polish (27), Dutch (25) and the rest of the ~1,746 drivable
-      voices need per-language lexicons/WFSTs (gruut MIT lexicons and
-      WikiPron + phonetisaurus training are the intended sources — the
-      `ingest` module, `OovFallback` chain, and `DocumentPhonemizer`
-      trait are ready for them). MMS voices want per-language *character*
-      frontends (transliteration-style), which is simpler than
-      phonemization. ByT5 stays the zero-data option behind the existing
-      trait for languages where no lexicon exists.
+- [x] Per-language G2P path proven for German: gruut MIT lexicon →
+      `gruut2tsv.py` → FST lexicon → piper de_DE-thorsten with measured
+      word boundaries; 0.00% symbols dropped over 236k (resolver now
+      handles ASCII homoglyphs `g`→`ɡ` and drops diacritics the voice
+      doesn't carry). Same pipeline applies to gruut's other ~19
+      languages.
+- [ ] **Lexicon archive** — a published, permissively-licensed archive of
+      compiled lexicons keyed by language/alphabet (the "espeak-ng
+      replacement" consumers can point at), plus a manifest joining
+      sherpa-onnx-tts-models `lang_code` → lexicon bundle → floravox
+      load call; packaged as a small fetcher crate so any Rust consumer
+      (rust-tts-wrapper included) gets best-in-class phonemization with
+      one line. Also relevant upstream: sherpa-onnx is dropping espeak-ng
+      (k2-fsa/sherpa-onnx#3731).
+- [ ] floravox crates on crates.io (currently git-tag consumption)
 - [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch, tracking
       floravox v0.4.0) + sherpa-onnx-tts-models registry routing
 - [ ] VoiceGarden-SPD module integration
