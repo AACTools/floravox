@@ -349,20 +349,16 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
                 // streams out while sentence N+1 is still synthesizing
                 // (and the ORT arena sees bounded pass shapes). Explicit
                 // <s>/<p> tags already produced their own segments.
+                // Each sentence/cap fragment is its own inference pass
+                // (no same-rate re-merging): pass shape bounds the ORT
+                // arena, and sentence-level streaming needs the split.
                 for chunk in split_sentences(words) {
                     let rate = chunk[0].prosody.rate.unwrap_or(1.0);
-                    match plan.last_mut() {
-                        Some(PlanItem::Words {
-                            words: w, rate: r, ..
-                        }) if (*r - rate).abs() < 1e-6 => {
-                            w.extend(chunk);
-                        }
-                        _ => plan.push(PlanItem::Words {
-                            words: chunk,
-                            rate,
-                            marks: take_marks(&mut pending_marks),
-                        }),
-                    }
+                    plan.push(PlanItem::Words {
+                        words: chunk,
+                        rate,
+                        marks: take_marks(&mut pending_marks),
+                    });
                     if let Some(PlanItem::Words { words, .. }) = plan.last() {
                         if words.last().is_some_and(|w| is_sentence_final(&w.text)) {
                             plan.push(PlanItem::SentenceEnd);
@@ -394,11 +390,37 @@ fn plan_document(map: &HashMap<String, Vec<i64>>, input: &str) -> anyhow::Result
     if !pending_marks.is_empty() {
         push_or_attach(&mut plan, pending_marks);
     }
+    if std::env::var_os("FLORAVOX_DEBUG_PLAN").is_some() {
+        let lens: Vec<usize> = plan
+            .iter()
+            .filter_map(|p| match p {
+                PlanItem::Words { words, .. } => Some(words.len()),
+                _ => None,
+            })
+            .collect();
+        eprintln!("[plan] runs: {lens:?}");
+    }
     Ok(plan)
 }
 
-/// Split a word run at sentence-final words (`.`, `!`, `?`, `…`,
-/// CJK/Armenian/Thai terminals). The terminator stays with its sentence.
+/// Maximum words per inference pass. Long unsplit text (comma-spliced
+/// clauses, transcription output) would otherwise make one giant pass,
+/// and the ORT arena grows with the longest pass shape (measured: a
+/// 19-word run peaked 255 MB vs 166 MB for the same words in two
+/// passes). Runs over the cap split at the nearest comma, else at a
+/// word boundary; sentence boundaries always win first. Override with
+/// `FLORAVOX_MAX_PASS_WORDS` (0 disables capping).
+fn max_pass_words() -> usize {
+    std::env::var("FLORAVOX_MAX_PASS_WORDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16)
+}
+
+/// Split a word run at sentence-final words (`.`, `!`, `?`, `...`,
+/// CJK/Armenian/Thai terminals), then cap remaining runs at
+/// [`max_pass_words`] by splitting at commas (preferred) or word
+/// boundaries. The terminator stays with its sentence.
 fn split_sentences(words: &[WordSpan]) -> Vec<Vec<WordSpan>> {
     let mut out: Vec<Vec<WordSpan>> = Vec::new();
     let mut cur: Vec<WordSpan> = Vec::new();
@@ -410,6 +432,34 @@ fn split_sentences(words: &[WordSpan]) -> Vec<Vec<WordSpan>> {
     }
     if !cur.is_empty() {
         out.push(cur);
+    }
+    // Cap pass length: split over-long runs at the comma nearest the cap
+    // (a natural pause), falling back to the word boundary at the cap.
+    let cap = max_pass_words();
+    if cap > 0 {
+        let mut capped: Vec<Vec<WordSpan>> = Vec::with_capacity(out.len());
+        for run in out {
+            if run.len() <= cap {
+                capped.push(run);
+                continue;
+            }
+            let mut start = 0usize;
+            while start < run.len() {
+                let remaining = run.len() - start;
+                if remaining <= cap {
+                    capped.push(run[start..].to_vec());
+                    break;
+                }
+                let window = &run[start..start + cap];
+                let cut = window
+                    .iter()
+                    .rposition(|w| w.text.trim_end().ends_with(','))
+                    .map_or(start + cap, |i| start + i + 1);
+                capped.push(run[start..cut].to_vec());
+                start = cut;
+            }
+        }
+        out = capped;
     }
     if out.is_empty() {
         out.push(Vec::new());
@@ -793,7 +843,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_merges_same_rate_words() {
+    fn single_sentence_is_one_item() {
         let plan = plan_document(&map(), "hello world").unwrap();
         assert_eq!(plan.len(), 1);
     }
@@ -818,6 +868,53 @@ mod tests {
             .filter(|p| matches!(p, PlanItem::SentenceEnd))
             .count();
         assert_eq!(ends, 3);
+    }
+
+    #[test]
+    fn long_runs_are_capped_at_commas_or_boundaries() {
+        // 19 words, no sentence punctuation: must split into runs <= 16.
+        std::env::set_var("FLORAVOX_MAX_PASS_WORDS", "16");
+        let words: Vec<&str> = "a b c d e f g h i j k l m n o p q r s"
+            .split_whitespace()
+            .collect();
+        let spans: Vec<floravox_ssml::WordSpan> = words
+            .iter()
+            .map(|w| floravox_ssml::WordSpan {
+                text: (*w).into(),
+                spoken: (*w).into(),
+                char_span: 0..1,
+                byte_span: 0..1,
+                phonemes: None,
+                prosody: floravox_ssml::Prosody::default(),
+                say_as: floravox_ssml::SayAs::None,
+                voice: None,
+            })
+            .collect();
+        let runs = split_sentences(&spans);
+        assert!(
+            runs.iter().all(|r| r.len() <= 16),
+            "run lengths: {:?}",
+            runs.iter().map(Vec::len).collect::<Vec<_>>()
+        );
+        // comma preference: split at the comma inside the window
+        let comma_words = "w1 , w3 w4 w5 w6 w7 w8 w9 w10 w11 w12 w13 w14 w15 w16 w17 w18";
+        std::env::set_var("FLORAVOX_MAX_PASS_WORDS", "8");
+        let spans2: Vec<floravox_ssml::WordSpan> = comma_words
+            .split_whitespace()
+            .map(|w| floravox_ssml::WordSpan {
+                text: w.into(),
+                spoken: w.into(),
+                char_span: 0..1,
+                byte_span: 0..1,
+                phonemes: None,
+                prosody: floravox_ssml::Prosody::default(),
+                say_as: floravox_ssml::SayAs::None,
+                voice: None,
+            })
+            .collect();
+        let runs2 = split_sentences(&spans2);
+        assert!(runs2[0].last().is_some_and(|w| w.text == ","));
+        std::env::remove_var("FLORAVOX_MAX_PASS_WORDS");
     }
 
     #[test]

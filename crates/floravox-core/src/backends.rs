@@ -150,6 +150,14 @@ pub fn load_voice(path: impl AsRef<Path>) -> anyhow::Result<Box<dyn VoiceBackend
             .with_memory_pattern(false)
             .map_err(|e| anyhow!("mem pattern: {e}"))?;
     }
+    if std::env::var_os("FLORAVOX_SHRINK_ARENA").is_some() {
+        // ORT >= 1.17: free unused arena chunks back to the OS after each
+        // run. Small per-inference overhead; opt-in for memory-tight
+        // long-form deployments.
+        builder = builder
+            .with_config_entry("memory.enable_memory_arena_shrinking", "1")
+            .map_err(|e| anyhow!("arena shrinking: {e}"))?;
+    }
     if std::env::var_os("FLORAVOX_NO_ARENA").is_some() {
         // Plain malloc/free per allocation: peak RSS tracks the live
         // working set instead of the arena high-water mark, at a small

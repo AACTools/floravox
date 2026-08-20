@@ -36,11 +36,12 @@ fn main() -> anyhow::Result<()> {
     // warmup
     let (audio, _) = backend.run(&ids, 1.0)?;
     let mut best = std::time::Duration::MAX;
-    for _ in 0..5 {
+    for i in 0..5 {
         let t = std::time::Instant::now();
         let (a, _) = backend.run(&ids, 1.0)?;
         best = best.min(t.elapsed());
         let _ = a.len();
+        eprintln!("after run {i}: peak RSS {:.0} MB", rss_mb());
     }
     println!(
         "run({n} ids) -> {} samples ({:.2}s audio) in {:.0} ms | {:.0} ms per audio-second | RTF {:.3}",
