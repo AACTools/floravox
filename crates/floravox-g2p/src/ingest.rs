@@ -3,12 +3,12 @@
 //! Three source formats are understood:
 //!
 //! * **CMUDICT** — `WORD  P HH R AH1 N` (whitespace-separated ARPABET with
-//!   stress digits). Converted to IPA targeting the piper/espeak en_US
+//!   stress digits). Converted to IPA targeting the `piper/espeak en_US`
 //!   phoneme inventory: `AH0`/`ER0` reduce to `ə`/`ɚ`, other stress marks
 //!   become standalone `ˈ`/`ˌ` symbols, and affricates map to `tʃ`/`dʒ`.
-//! * **IPA TSV** — `word\tIPA` with unsegmented IPA (WikiPron downloads,
-//!   gruut extractions). The right-hand side is clustered into phoneme
-//!   symbols by [`ipa_tokens`].
+//! * **IPA TSV** — `word\tIPA` with unsegmented IPA (`WikiPron`
+//!   downloads, `gruut` extractions). The right-hand side is clustered
+//!   into phoneme symbols by [`ipa_tokens`].
 //! * **TSV** — `word\tph1 ph2 ph3` with pre-segmented phonemes (the native
 //!   format of [`crate::FstLexicon::from_tsv`], tolerated variant).
 //!
@@ -33,7 +33,7 @@ use crate::Phoneme;
 pub enum SourceFormat {
     /// CMUDICT: `WORD  P HH R AH1 N` (ARPABET + stress digits).
     CmuDict,
-    /// `word\tIPA` with unsegmented IPA (WikiPron, gruut extractions).
+    /// `word\tIPA` with unsegmented IPA (`WikiPron`, `gruut` extractions).
     IpaTsv,
     /// `word\tph1 ph2 ph3` with pre-segmented phonemes.
     Tsv,
@@ -55,9 +55,9 @@ impl SourceFormat {
             if line_is_cmudict(line) {
                 cmudict += 1;
             } else if let Some((_, right)) = line.split_once('\t') {
-                // Unsegmented IPA (WikiPron style) has no spaces on the
+                // Unsegmented IPA (`WikiPron` style) has no spaces on the
                 // right-hand side; pre-segmented TSV phonemes do.
-                if right.chars().any(|c| !c.is_ascii()) && !right.chars().any(char::is_whitespace)
+                if !right.is_ascii() && !right.chars().any(char::is_whitespace)
                 {
                     ipa += 1;
                 } else {
@@ -176,7 +176,7 @@ pub fn parse_tsv(text: &str) -> Ingested {
 
 /// Convert one ARPABET symbol (without stress digit) to IPA.
 ///
-/// The mapping targets the piper/espeak en_US inventory (`ɹ` for R,
+/// The mapping targets the `piper/espeak en_US` inventory (`ɹ` for R,
 /// diphthongs as single symbols like `eɪ`/`oʊ`). `AH`/`ER` stress
 /// reductions are handled separately in [`parse_cmudict`].
 #[must_use]
@@ -282,7 +282,7 @@ fn is_ipa_modifier(ch: char) -> bool {
     matches!(u32::from(ch), 0x02B0..=0x02FF | 0x0300..=0x036F | 0x207F)
 }
 
-/// Adjacent symbol pairs kept as single diphthong symbols (piper en_US).
+/// Adjacent symbol pairs kept as single diphthong symbols (`piper en_US`).
 const DIPHTHONGS: [&str; 5] = ["aɪ", "aʊ", "eɪ", "oʊ", "ɔɪ"];
 
 fn merge_diphthongs(tokens: Vec<Phoneme>) -> Vec<Phoneme> {

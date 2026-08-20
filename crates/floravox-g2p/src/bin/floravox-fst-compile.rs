@@ -2,12 +2,14 @@
 //! (`stem.fst` + `stem.pho`).
 //!
 //! Usage:
-//!   floravox-fst-compile [--format FMT] INPUT OUTPUT_STEM
+//! ```text
+//! floravox-fst-compile [--format FMT] INPUT OUTPUT_STEM
+//! ```
 //!
 //! FMT: auto (default) | cmudict | ipa-tsv | tsv
 //!
 //! * cmudict — `WORD  P HH R AH1 N` (converted ARPABET → IPA)
-//! * ipa-tsv — `word\tIPA` with unsegmented IPA (WikiPron, gruut)
+//! * ipa-tsv — `word\tIPA` with unsegmented IPA (`WikiPron`, `gruut`)
 //! * tsv     — `word\tph1 ph2` pre-segmented phonemes
 //!
 //! INPUT may be `-` for stdin. Lines starting with `#` (or `;;;` for

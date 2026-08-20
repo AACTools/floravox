@@ -23,6 +23,7 @@ fn run(args: &[String]) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("timeline") => cmd_timeline(&args[1..]),
         Some("synth") => cmd_synth(&args[1..]),
+        Some("g2p") => cmd_g2p(&args[1..]),
         Some("help") | None => {
             print_help();
             Ok(())
@@ -38,10 +39,12 @@ fn print_help() {
         "floravox — event-driven SSML TTS diagnostics\n\n\
          USAGE:\n  \
          floravox timeline [INPUT]          dump parsed segments & word spans\n  \
+         floravox g2p --phonetisaurus S W…  phonemize words (no voice needed)\n  \
          floravox synth --model M --text T  synthesize to out.wav + events.json\n\n\
          timeline reads stdin when INPUT is absent or `-`.\n\
-         synth also takes --lexicon STEM (compiled stem.fst/.pho) and\n\
-         --file F for input text."
+         synth also takes --lexicon STEM (compiled stem.fst/.pho),\n\
+         --phonetisaurus STEM (model.fst + grapheme/phoneme tables) and\n\
+         --byt5-encoder/--byt5-decoder for OOV, plus --file F for text."
     );
 }
 
@@ -104,6 +107,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut text: Option<String> = None;
     let mut text_file: Option<String> = None;
     let mut lexicon_stem: Option<String> = None;
+    let mut phonetisaurus_stem: Option<String> = None;
     let mut byt5_encoder: Option<String> = None;
     let mut byt5_decoder: Option<String> = None;
     let mut out_wav = "out.wav".to_string();
@@ -115,6 +119,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             "--text" => text = args.get(i + 1).cloned(),
             "--file" => text_file = args.get(i + 1).cloned(),
             "--lexicon" => lexicon_stem = args.get(i + 1).cloned(),
+            "--phonetisaurus" => phonetisaurus_stem = args.get(i + 1).cloned(),
             "--byt5-encoder" => byt5_encoder = args.get(i + 1).cloned(),
             "--byt5-decoder" => byt5_decoder = args.get(i + 1).cloned(),
             "--out" => out_wav = args.get(i + 1).cloned().unwrap_or(out_wav),
@@ -134,37 +139,15 @@ fn cmd_synth(args: &[String]) -> Result<()> {
 
     #[cfg(feature = "onnx")]
     {
-        // Lexicon-backed phonemizer when a stem is given; empty lexicon
-        // otherwise. OOV duty: ByT5 when a model pair is given, chained
-        // down to letter-name spelling.
-        if byt5_encoder.is_some() != byt5_decoder.is_some() {
-            bail!("--byt5-encoder and --byt5-decoder go together");
-        }
-        let rule = floravox_g2p::RuleFallback::default();
-        let fallback: Box<dyn floravox_g2p::OovFallback + Send> =
-            match (&byt5_encoder, &byt5_decoder) {
-                (Some(enc), Some(dec)) => {
-                    let byt5 = floravox_g2p::Byt5G2p::load(enc, dec)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    println!("byt5 fallback: {} + {}", enc, dec);
-                    Box::new(floravox_g2p::ChainedFallback(byt5, rule))
-                }
-                _ => Box::new(rule),
-            };
-        let g2p: Box<dyn floravox_g2p::TokenPhonemizer + Send> =
-            match &lexicon_stem {
-                Some(stem) => {
-                    let lexicon = floravox_g2p::MmapLexicon::open(stem)
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    println!("lexicon: {stem}.fst/.pho ({} entries)", lexicon.len());
-                    Box::new(floravox_g2p::LexiconPhonemizer::new(lexicon, fallback))
-                }
-                None => Box::new(floravox_g2p::LexiconPhonemizer::new(
-                    floravox_g2p::FstLexicon::from_rows(Vec::new())?,
-                    fallback,
-                )),
-            };
-        let cached = floravox_g2p::CachedPhonemizer::new(g2p, 1024);
+        let cached = floravox_g2p::CachedPhonemizer::new(
+            build_phonemizer(
+                lexicon_stem.as_deref(),
+                phonetisaurus_stem.as_deref(),
+                byt5_encoder.as_deref(),
+                byt5_decoder.as_deref(),
+            )?,
+            1024,
+        );
         let voice = floravox_core::synth::VoiceModel::load(&model_path)?;
         println!(
             "model: {} Hz, {} phonemes, durations output: {}",
@@ -202,12 +185,115 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     }
     #[cfg(not(feature = "onnx"))]
     {
-        let _ = (model_path, input, out_wav, out_events, lexicon_stem, byt5_encoder, byt5_decoder);
+        let _ = (
+            model_path,
+            input,
+            out_wav,
+            out_events,
+            lexicon_stem,
+            phonetisaurus_stem,
+            byt5_encoder,
+            byt5_decoder,
+        );
         bail!("floravox-cli was built without the `onnx` feature");
     }
 }
 
-/// Minimal 16-bit PCM WAV writer (mono).
+/// Assemble the phonemizer: lexicon-backed when a stem is given, empty
+/// lexicon otherwise. OOV duty, cheapest engine first: `Phonetisaurus`
+/// WFST, `ByT5`, then letter-name spelling.
+#[cfg(feature = "onnx")]
+fn build_phonemizer(
+    lexicon_stem: Option<&str>,
+    phonetisaurus_stem: Option<&str>,
+    byt5_encoder: Option<&str>,
+    byt5_decoder: Option<&str>,
+) -> Result<Box<dyn floravox_g2p::TokenPhonemizer + Send>> {
+    if byt5_encoder.is_some() != byt5_decoder.is_some() {
+        bail!("--byt5-encoder and --byt5-decoder go together");
+    }
+    let mut fallback: Box<dyn floravox_g2p::OovFallback + Send> =
+        Box::new(floravox_g2p::RuleFallback::default());
+    if let (Some(enc), Some(dec)) = (byt5_encoder, byt5_decoder) {
+        let byt5 = floravox_g2p::Byt5G2p::load(enc, dec).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("byt5 fallback: {enc} + {dec}");
+        fallback = Box::new(floravox_g2p::ChainedFallback(byt5, fallback));
+    }
+    if let Some(stem) = phonetisaurus_stem {
+        let ph =
+            floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!(
+            "phonetisaurus fallback: {stem}.fst ({} states, {} arcs)",
+            ph.num_states(),
+            ph.num_arcs()
+        );
+        fallback = Box::new(floravox_g2p::ChainedFallback(ph, fallback));
+    }
+    Ok(match lexicon_stem {
+        Some(stem) => {
+            let lexicon =
+                floravox_g2p::MmapLexicon::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!("lexicon: {stem}.fst/.pho ({} entries)", lexicon.len());
+            Box::new(floravox_g2p::LexiconPhonemizer::new(lexicon, fallback))
+        }
+        None => Box::new(floravox_g2p::LexiconPhonemizer::new(
+            floravox_g2p::FstLexicon::from_rows(Vec::new())?,
+            fallback,
+        )),
+    })
+}
+
+/// `floravox g2p` — phonemize words with a Phonetisaurus model, no voice
+/// required.
+fn cmd_g2p(args: &[String]) -> Result<()> {
+    let mut phonetisaurus_stem: Option<String> = None;
+    let mut words: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--phonetisaurus" => {
+                phonetisaurus_stem = args.get(i + 1).cloned();
+                if phonetisaurus_stem.is_none() {
+                    bail!("--phonetisaurus needs a model stem");
+                }
+                i += 2;
+            }
+            other if other.starts_with("--") => bail!("unknown g2p flag {other:?}"),
+            other => {
+                words.push(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    let Some(stem) = &phonetisaurus_stem else {
+        bail!("g2p requires --phonetisaurus STEM (model.fst + tables)");
+    };
+    if words.is_empty() {
+        bail!("give at least one word");
+    }
+    let model =
+        floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
+    eprintln!(
+        "model: {} states, {} arcs",
+        model.num_states(),
+        model.num_arcs()
+    );
+    for word in &words {
+        match model.phonemize(word) {
+            Some(phonemes) => println!("{word}\t{}", phonemes.join(" ")),
+            None => println!("{word}\t(no path)"),
+        }
+    }
+    Ok(())
+}
+
+/// Minimal 16-bit PCM WAV writer (mono). Sample counts and lengths are
+/// bounded by real utterance sizes.
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss
+)]
 fn write_wav(path: &str, samples: &[f32], sample_rate: u32) -> Result<()> {
     let mut pcm: Vec<i16> = Vec::with_capacity(samples.len());
     for &s in samples {

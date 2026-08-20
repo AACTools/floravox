@@ -100,8 +100,9 @@ impl SynthesisEvent {
     pub fn ms(&self) -> u64 {
         match self {
             Self::WordBoundary(w) => w.ms_start,
-            Self::MarkReached { ms, .. } | Self::Finished { total_ms: ms, .. } => *ms,
-            Self::BreakStarted { ms, .. } => *ms,
+            Self::MarkReached { ms, .. }
+            | Self::Finished { total_ms: ms, .. }
+            | Self::BreakStarted { ms, .. } => *ms,
             _ => 0,
         }
     }

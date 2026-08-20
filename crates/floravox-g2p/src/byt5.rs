@@ -1,8 +1,8 @@
-//! Byte-level T5 (ByT5) grapheme-to-phoneme as an [`OovFallback`] engine.
+//! Byte-level T5 (`ByT5`) grapheme-to-phoneme as an [`OovFallback`] engine.
 //!
-//! ByT5 models read and write raw UTF-8 bytes — no tokenizer artifacts to
-//! keep in sync with training. Export a Hugging Face ByT5 G2P checkpoint
-//! with optimum:
+//! `ByT5` models read and write raw UTF-8 bytes — no tokenizer artifacts to
+//! keep in sync with training. Export a Hugging Face `ByT5` G2P checkpoint
+//! with `optimum`:
 //!
 //! ```console
 //! optimum-cli export onnx --model <hf-byt5-g2p-checkpoint> out/
@@ -27,14 +27,14 @@ use crate::{G2pError, OovFallback, Phoneme};
 use ort::value::Tensor;
 use ort::session::Session;
 
-/// `</s>` in ByT5 vocabularies.
+/// `</s>` in `ByT5` vocabularies.
 const EOS: i64 = 1;
 /// Decoder start token (pad) in T5-family models.
 const DECODER_START: i64 = 0;
 /// Default cap on generated tokens per word.
 const DEFAULT_MAX_NEW_TOKENS: usize = 64;
 
-/// ByT5 G2P engine (encoder + decoder ONNX sessions).
+/// `ByT5` G2P engine (encoder + decoder ONNX sessions).
 ///
 /// See the [module docs](self) for export instructions.
 pub struct Byt5G2p {
@@ -46,9 +46,14 @@ pub struct Byt5G2p {
     /// Maximum generated tokens per word (default 64).
     pub max_new_tokens: usize,
     encoder_wants_mask: bool,
-    decoder_ids_name: String,
-    decoder_wants_mask: bool,
-    decoder_wants_hidden: bool,
+    decoder_layout: DecoderLayout,
+}
+
+/// Decoder input names discovered at load time (optimum export variants).
+struct DecoderLayout {
+    ids_name: String,
+    wants_encoder_mask: bool,
+    wants_hidden_states: bool,
 }
 
 impl Byt5G2p {
@@ -83,14 +88,17 @@ impl Byt5G2p {
             .inputs()
             .iter()
             .any(|i| i.name() == "attention_mask");
-        let decoder_wants_mask = decoder
-            .inputs()
-            .iter()
-            .any(|i| i.name() == "encoder_attention_mask");
-        let decoder_wants_hidden = decoder
-            .inputs()
-            .iter()
-            .any(|i| i.name() == "encoder_hidden_states");
+        let decoder_layout = DecoderLayout {
+            ids_name: decoder_ids_name,
+            wants_encoder_mask: decoder
+                .inputs()
+                .iter()
+                .any(|i| i.name() == "encoder_attention_mask"),
+            wants_hidden_states: decoder
+                .inputs()
+                .iter()
+                .any(|i| i.name() == "encoder_hidden_states"),
+        };
 
         Ok(Self {
             encoder,
@@ -98,9 +106,7 @@ impl Byt5G2p {
             add_eos: true,
             max_new_tokens: DEFAULT_MAX_NEW_TOKENS,
             encoder_wants_mask,
-            decoder_ids_name,
-            decoder_wants_mask,
-            decoder_wants_hidden,
+            decoder_layout,
         })
     }
 
@@ -110,7 +116,7 @@ impl Byt5G2p {
     /// [`G2pError::Inference`] on session or tensor failures.
     pub fn phonemize_word(&mut self, word: &str) -> Result<Vec<Phoneme>, G2pError> {
         let ids = encode_input(word, self.add_eos);
-        let seq = ids.len() as i64;
+        let seq = i64::try_from(ids.len()).unwrap_or(i64::MAX);
         let input_ids = tensor_i64(vec![1_i64, seq], ids.clone())?;
         let mask = tensor_i64(vec![1_i64, seq], vec![1_i64; ids.len()])?;
 
@@ -144,27 +150,30 @@ impl Byt5G2p {
         let mut dec_ids: Vec<i64> = vec![DECODER_START];
         let mut out_bytes: Vec<u8> = Vec::new();
         for _ in 0..self.max_new_tokens {
-            let dlen = dec_ids.len() as i64;
+            let dlen = i64::try_from(dec_ids.len()).unwrap_or(i64::MAX);
             let dec_in = tensor_i64(vec![1_i64, dlen], dec_ids.clone())?;
             let hidden = tensor_f32(h_shape.clone(), h_data.clone())?;
-            let dec_out = if self.decoder_wants_mask && self.decoder_wants_hidden {
+            let ids_name = &self.decoder_layout.ids_name;
+            let dec_out = if self.decoder_layout.wants_encoder_mask
+                && self.decoder_layout.wants_hidden_states
+            {
                 self.decoder
                     .run(ort::inputs![
-                        &self.decoder_ids_name => dec_in,
+                        ids_name => dec_in,
                         "encoder_attention_mask" => mask.clone(),
                         "encoder_hidden_states" => hidden
                     ])
                     .map_err(|e| G2pError::Inference(e.to_string()))?
-            } else if self.decoder_wants_hidden {
+            } else if self.decoder_layout.wants_hidden_states {
                 self.decoder
                     .run(ort::inputs![
-                        &self.decoder_ids_name => dec_in,
+                        ids_name => dec_in,
                         "encoder_hidden_states" => hidden
                     ])
                     .map_err(|e| G2pError::Inference(e.to_string()))?
             } else {
                 self.decoder
-                    .run(ort::inputs![&self.decoder_ids_name => dec_in])
+                    .run(ort::inputs![ids_name => dec_in])
                     .map_err(|e| G2pError::Inference(e.to_string()))?
             };
 
@@ -177,19 +186,18 @@ impl Byt5G2p {
                 .1
                 .try_extract_tensor::<f32>()
                 .map_err(|e| G2pError::Inference(e.to_string()))?;
-            let vocab = *l_shape.last().ok_or_else(|| {
+            let vocab = usize::try_from(*l_shape.last().ok_or_else(|| {
                 G2pError::Inference("logits tensor has no vocab dimension".into())
-            })? as usize;
-            let last_row = l_data
-                .get(l_data.len().saturating_sub(vocab)..)
-                .unwrap_or(&l_data);
-            let best = argmax(last_row);
+            })?)
+            .unwrap_or(0);
+            let start = l_data.len() - vocab.min(l_data.len());
+            let best = argmax(&l_data[start..]);
             if best == EOS {
                 break;
             }
             dec_ids.push(best);
-            if best >= 0 && best < 256 {
-                out_bytes.push(best as u8);
+            if let Ok(byte) = u8::try_from(best) {
+                out_bytes.push(byte);
             }
         }
         Ok(decode_output(&out_bytes))
@@ -218,7 +226,7 @@ fn tensor_f32(
     Tensor::from_array((shape.into(), data)).map_err(|e| G2pError::Inference(e.to_string()))
 }
 
-/// Word → ByT5 byte ids (`</s>` appended when `add_eos`).
+/// Word → `ByT5` byte ids (`</s>` appended when `add_eos`).
 fn encode_input(word: &str, add_eos: bool) -> Vec<i64> {
     let mut ids: Vec<i64> = word.bytes().map(i64::from).collect();
     if add_eos {
@@ -242,7 +250,7 @@ fn argmax(slice: &[f32]) -> i64 {
         .enumerate()
         .max_by(|a, b| a.1.total_cmp(b.1))
         .expect("non-empty logits");
-    best as i64
+    i64::try_from(best).unwrap_or(0)
 }
 
 #[cfg(test)]

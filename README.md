@@ -86,6 +86,37 @@ Decoding is greedy with an EOS stop; the engine implements
 `floravox_g2p::OovFallback` and chains down to letter-name spelling when
 it produces nothing (`floravox_g2p::ChainedFallback`).
 
+## OOV: Phonetisaurus WFST fallback
+
+For OOV duty without `ort`, a Phonetisaurus n-gram transducer gives
+lexicon-quality pronunciations from a few MB of weights. The decoder is a
+clean-room Rust implementation of the OpenFst container format plus a
+shortest-path search — no GPL code, no native dependencies, available in
+frontend-only builds:
+
+```console
+# Any phonetisaurus model works; the cmudict downloads embed their
+# symbol tables in the .fst itself:
+cargo run -p floravox-cli -- g2p --phonetisaurus cmudict-20170708.o8.fst \
+  hello world floravox
+#   hello    HH EH1 L OW0
+#   world    W ER1 L D
+#   floravox F L AO1 R AH0 V AA0 K S
+
+# Or wired into synthesis (tries phonetisaurus, then ByT5, then spelling):
+cargo run -p floravox-cli -- synth --model voice.onnx --lexicon en_US \
+  --phonetisaurus cmudict-20170708.o8.fst \
+  --text '<speak>Hello world</speak>' --out out.wav --events events.json
+```
+
+Both on-disk layouts load: embedded symbol tables (single `.fst`) or
+`model.fst` + `model.grapheme.table` + `model.phoneme.table`. Phonetisaurus
+16-byte arcs and stock OpenFst 20-byte arcs are auto-detected, compound
+symbols (`a|c` graphemes, `AH0|N` phonemes) are handled, and input casing
+is inferred from the grapheme table. Note the output alphabet is whatever
+the model was trained on (ARPABET for CMUDict models) — pair the model
+with a voice that speaks that alphabet.
+
 ## Quick start
 
 ```console
@@ -130,7 +161,9 @@ Dispatcher index-mark recipe.
 - [x] End-to-end verified against `en_US-lessac-low` (16 kHz)
 - [x] ByT5 ONNX OOV fallback engine (`floravox-g2p` `onnx` feature,
       greedy byte-level decoding, `ChainedFallback` to spelling)
-- [ ] Phonetisaurus WFST OOV fallback
+- [x] Phonetisaurus WFST OOV fallback (clean-room OpenFst reader +
+      shortest-path decode, no `ort` dependency; validated against a
+      1M-state CMUDict model)
 - [ ] rust-tts-wrapper engine adapter
 - [ ] VoiceGarden-SPD module integration
 

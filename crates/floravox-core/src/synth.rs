@@ -130,7 +130,8 @@ impl VoiceModel {
                 .as_ref()
                 .and_then(|m| m.get("num_speakers"))
                 .and_then(serde_json::Value::as_u64)
-                .map_or(0, |v| v as u32),
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(0),
         );
 
         let inference = raw.inference.unwrap_or_default();
@@ -152,13 +153,16 @@ impl VoiceModel {
     /// Run the acoustic model for one phoneme-id sequence.
     ///
     /// Returns `(audio f32 samples, per-id frame durations or None)`.
+    /// (Duration tensors are rounded floats by construction.)
+    #[allow(clippy::cast_possible_truncation)]
     fn run(
         &mut self,
         ids: &[i64],
         length_scale: f32,
     ) -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)> {
-        let input = ort::value::Tensor::from_array(([1_i64, ids.len() as i64], ids.to_vec()))?;
-        let len_input = ort::value::Tensor::from_array(([1_i64], vec![ids.len() as i64]))?;
+        let seq = i64::try_from(ids.len()).unwrap_or(i64::MAX);
+        let input = ort::value::Tensor::from_array(([1_i64, seq], ids.to_vec()))?;
+        let len_input = ort::value::Tensor::from_array(([1_i64], vec![seq]))?;
         let sid_input = self
             .config
             .speaker_id
@@ -423,6 +427,7 @@ fn push_or_attach(plan: &mut Vec<PlanItem>, marks: Vec<String>) {
 }
 
 /// Worker: execute the plan, sending audio and events.
+#[allow(clippy::too_many_lines)]
 fn synth_worker<G: TokenPhonemizer>(
     model: &mut VoiceModel,
     g2p: &mut G,

@@ -3,19 +3,19 @@
 //! Hybrid grapheme-to-phoneme conversion:
 //!
 //! * **Tier 1** — [`FstLexicon`]: static lexicons compiled with the `fst`
-//!   crate (`CMUDict`, `WikiPron`, gruut extractions). On-disk lexicons are
+//!   crate (`CMUDict`, `WikiPron`, `gruut` extractions). On-disk lexicons are
 //!   memory-mapped (~0 resident RAM), lookups are sub-100 µs, footprints are
 //!   ~5–15 MB per language.
 //! * **Tier 2** — [`OovFallback`]: pluggable out-of-vocabulary strategy —
-//!   rule-based spelling fallback here, a [`ByT5`](byt5::Byt5G2p) ONNX
-//!   engine behind the `onnx` feature, or a Phonetisaurus WFST behind the
-//!   same trait.
+//!   rule-based spelling fallback, a [`PhonetisaurusG2p`](phonetisaurus::PhonetisaurusG2p)
+//!   WFST engine (pure Rust, no `ort`), or a [`ByT5`](byt5::Byt5G2p) ONNX
+//!   engine behind the `onnx` feature — all behind the same trait.
 //!
 //! Wrap any phonemizer in a bounded [`CachedPhonemizer`] so repeated words
 //! (the common case in AAC and screen-reader workloads) cost one hash lookup.
 //!
 //! The [`ingest`] module converts third-party pronunciation data (CMUDICT,
-//! WikiPron / gruut extractions) into rows for [`LexiconWriter`].
+//! `WikiPron` / `gruut` extractions) into rows for [`LexiconWriter`].
 //!
 //! On-disk format: a lexicon "stem" is two files — `stem.fst` (word →
 //! packed `offset/length` u64) and `stem.pho` (a flat blob of
@@ -46,10 +46,12 @@ pub mod ingest;
 
 #[cfg(feature = "onnx")]
 pub mod byt5;
+pub mod phonetisaurus;
 
 pub use ingest::{Ingested, SourceFormat};
 #[cfg(feature = "onnx")]
 pub use byt5::Byt5G2p;
+pub use phonetisaurus::PhonetisaurusG2p;
 
 /// One pronunciation symbol (IPA-ish, model-specific alphabet).
 pub type Phoneme = String;
@@ -108,6 +110,7 @@ impl<D: AsRef<[u8]>> fmt::Debug for FstLexicon<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FstLexicon")
             .field("entries", &self.map.len())
+            .field("blob_bytes", &self.blob.as_ref().len())
             .finish()
     }
 }

@@ -329,7 +329,7 @@ fn parse_xml(input: &str) -> ParseOutcome {
 
     loop {
         // Position at the END of the previous event == start of the next.
-        let event_start = reader.buffer_position() as usize;
+        let event_start = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
         let event = match reader.read_event() {
             Ok(ev) => ev,
             Err(e) => {
@@ -339,7 +339,7 @@ fn parse_xml(input: &str) -> ParseOutcome {
                 break;
             }
         };
-        let event_end = reader.buffer_position() as usize;
+        let event_end = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
 
         match event {
             Event::Start(tag) => {
@@ -476,7 +476,7 @@ fn memfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Handle a start (or empty) tag.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle_open(
     st: &mut ParserState,
     doc: &mut SsmlDocument,
@@ -571,8 +571,7 @@ fn handle_open(
                 Some("characters" | "spell-out") => SayAs::Characters,
                 Some("cardinal" | "number") => SayAs::Cardinal,
                 Some("ordinal") => SayAs::Ordinal,
-                Some(_) => SayAs::Other,
-                None => SayAs::Other,
+                Some(_) | None => SayAs::Other,
             };
             st.say_as_stack.push(mode);
         }

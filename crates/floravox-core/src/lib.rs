@@ -49,7 +49,9 @@ pub fn fold_word_timings(
     prefix.push(0);
     let mut acc = 0u64;
     for &d in durations {
-        acc += d.max(0) as u64 * u64::from(hop_length);
+        acc += u64::try_from(d.max(0))
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(hop_length));
         prefix.push(acc);
     }
     groups
@@ -69,7 +71,7 @@ pub fn sample_at_id_index(durations: &[i64], index: usize, hop_length: u32) -> u
     durations
         .iter()
         .take(index)
-        .map(|&d| d.max(0) as u64)
+        .map(|&d| u64::try_from(d.max(0)).unwrap_or(u64::MAX))
         .sum::<u64>()
         * u64::from(hop_length)
 }
