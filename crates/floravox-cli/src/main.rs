@@ -80,7 +80,7 @@ fn cmd_timeline(args: &[String]) -> Result<()> {
                         w.char_span.end,
                         w.byte_span.start,
                         w.byte_span.end,
-                        w.prosody.rate.map_or(1.0, |r| r),
+                        w.prosody.rate.unwrap_or(1.0),
                         w.say_as,
                     )?;
                 }
