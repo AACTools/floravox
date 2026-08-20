@@ -1,64 +1,30 @@
 //! ONNX acoustic synthesis via `ort`, with duration-aware event emission.
 //!
-//! Works with any piper-family VITS export; when the model has been patched
-//! by `python/add_durations_output.py` (extra `"durations"` output), word
-//! and mark events carry **measured** sample positions. Stock models fall
-//! back to [`crate::estimate`] timings flagged `estimated: true`.
+//! Voice families (piper/MMS VITS, Matcha+vocoder) live in
+//! [`crate::backends`] behind the [`crate::VoiceBackend`] trait. When the
+//! model has been patched by `python/add_durations_output.py` (extra
+//! `"durations"` output), word and mark events carry **measured** sample
+//! positions. Stock models fall back to [`crate::estimate`] timings
+//! flagged `estimated: true`.
 
+use crate::backends::VoiceBackend;
 use crate::estimate::estimate_timings;
 use crate::events::{SynthesisEvent, WordTiming};
 use crate::{fold_word_timings, sample_at_id_index};
 use anyhow::anyhow;
 use floravox_g2p::TokenPhonemizer;
 use floravox_ssml::{parse as parse_ssml, Segment, WordSpan};
-use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 
 /// Samples per streamed audio chunk.
 const CHUNK_SAMPLES: usize = 8192;
 
-/// Symbols piper models reserve for control ids.
+/// Symbols piper-style models reserve for control ids.
 const BOS: &str = "^";
 const EOS: &str = "$";
 const PAD: &str = "_";
-
-/// Model configuration loaded from the piper-style `<model>.onnx.json`.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct VoiceConfig {
-    /// Audio section.
-    pub audio: Option<AudioSection>,
-    /// Inference scaling parameters.
-    pub inference: Option<InferenceSection>,
-    /// Symbol → id list mapping.
-    pub phoneme_id_map: Option<HashMap<String, Vec<i64>>>,
-    /// Speaker count.
-    #[serde(default)]
-    pub num_speakers: u32,
-    /// Raw metadata (passthrough).
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-/// `audio` section of the piper config.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AudioSection {
-    /// Output sample rate.
-    pub sample_rate: u32,
-}
-
-/// `inference` section of the piper config.
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct InferenceSection {
-    /// Decoder randomness.
-    pub noise_scale: Option<f32>,
-    /// Phoneme duration scaling (rate control).
-    pub length_scale: Option<f32>,
-    /// Duration-predictor randomness.
-    pub noise_scale_w: Option<f32>,
-}
 
 /// Fully-resolved voice parameters.
 #[derive(Debug, Clone)]
@@ -84,157 +50,6 @@ pub struct ResolvedConfig {
     pub uses_scales: bool,
 }
 
-/// A loaded ONNX voice with its configuration.
-pub struct VoiceModel {
-    session: ort::session::Session,
-    /// Resolved effective configuration.
-    pub config: ResolvedConfig,
-}
-
-impl VoiceModel {
-    /// Load `model.onnx` + `model.onnx.json` from `path` (either the .onnx
-    /// file or its stem).
-    /// # Errors
-    ///
-    /// Fails when files are unreadable, the JSON is malformed, or the
-    /// phoneme map is missing.
-    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let onnx = path.as_ref();
-        let onnx_path = if onnx.extension().and_then(|e| e.to_str()) == Some("onnx") {
-            onnx.to_path_buf()
-        } else {
-            onnx.with_extension("onnx")
-        };
-        let json_path = onnx_path.with_extension("onnx.json");
-
-        let raw: VoiceConfig = if json_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&json_path)?)?
-        } else {
-            VoiceConfig::default()
-        };
-
-        let map = raw.phoneme_id_map.ok_or_else(|| {
-            anyhow!(
-                "no phoneme_id_map in {}; cannot drive a piper model without it",
-                json_path.display()
-            )
-        })?;
-
-        let session = ort::session::Session::builder()?.commit_from_file(&onnx_path)?;
-
-        let has_durations = session.outputs().iter().any(|o| o.name() == "durations");
-        let uses_scales = session.inputs().iter().any(|i| i.name() == "scales");
-
-        let num_speakers = raw.num_speakers.max(
-            raw.metadata
-                .as_ref()
-                .and_then(|m| m.get("num_speakers"))
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok())
-                .unwrap_or(0),
-        );
-
-        let inference = raw.inference.unwrap_or_default();
-        let config = ResolvedConfig {
-            sample_rate: raw.audio.map_or(22_050, |a| a.sample_rate),
-            hop_length: 256,
-            phoneme_id_map: map,
-            noise_scale: inference.noise_scale.unwrap_or(0.667),
-            length_scale: inference.length_scale.unwrap_or(1.0),
-            noise_scale_w: inference.noise_scale_w.unwrap_or(0.8),
-            speaker_id: (num_speakers > 1).then_some(0),
-            has_durations,
-            uses_scales,
-        };
-
-        Ok(Self { session, config })
-    }
-
-    /// Run the acoustic model for one phoneme-id sequence.
-    ///
-    /// Returns `(audio f32 samples, per-id frame durations or None)`.
-    /// (Duration tensors are rounded floats by construction.)
-    #[allow(clippy::cast_possible_truncation)]
-    fn run(
-        &mut self,
-        ids: &[i64],
-        length_scale: f32,
-    ) -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)> {
-        let seq = i64::try_from(ids.len()).unwrap_or(i64::MAX);
-        let input = ort::value::Tensor::from_array(([1_i64, seq], ids.to_vec()))?;
-        let len_input = ort::value::Tensor::from_array(([1_i64], vec![seq]))?;
-        let sid_input = self
-            .config
-            .speaker_id
-            .map(|sid| ort::value::Tensor::from_array(([1_i64], vec![sid])))
-            .transpose()?;
-
-        let outputs = if self.config.uses_scales {
-            let scales = ort::value::Tensor::from_array((
-                [3_i64],
-                vec![
-                    self.config.noise_scale,
-                    length_scale,
-                    self.config.noise_scale_w,
-                ],
-            ))?;
-            if let Some(sid) = sid_input {
-                self.session.run(ort::inputs![
-                    "input" => input,
-                    "input_lengths" => len_input,
-                    "scales" => scales,
-                    "sid" => sid
-                ])?
-            } else {
-                self.session.run(ort::inputs![
-                    "input" => input,
-                    "input_lengths" => len_input,
-                    "scales" => scales
-                ])?
-            }
-        } else {
-            let noise = ort::value::Tensor::from_array(([1_i64], vec![self.config.noise_scale]))?;
-            let scale = ort::value::Tensor::from_array(([1_i64], vec![length_scale]))?;
-            let noise_w =
-                ort::value::Tensor::from_array(([1_i64], vec![self.config.noise_scale_w]))?;
-            if let Some(sid) = sid_input {
-                self.session.run(ort::inputs![
-                    "input" => input,
-                    "input_lengths" => len_input,
-                    "noise_scale" => noise,
-                    "length_scale" => scale,
-                    "noise_scale_w" => noise_w,
-                    "sid" => sid
-                ])?
-            } else {
-                self.session.run(ort::inputs![
-                    "input" => input,
-                    "input_lengths" => len_input,
-                    "noise_scale" => noise,
-                    "length_scale" => scale,
-                    "noise_scale_w" => noise_w
-                ])?
-            }
-        };
-
-        let mut audio: Vec<f32> = Vec::new();
-        let mut durations: Option<Vec<i64>> = None;
-        for (name, output) in &outputs {
-            if name == "output" {
-                let view = output.try_extract_tensor::<f32>()?;
-                audio = view.1.to_vec();
-            } else if name == "durations" {
-                // The tapped Ceil tensor is float in piper exports.
-                let view = output.try_extract_tensor::<f32>()?;
-                durations = Some(view.1.iter().map(|&f| f.round() as i64).collect());
-            }
-        }
-        if audio.is_empty() {
-            return Err(anyhow!("model produced no audio output"));
-        }
-        Ok((audio, durations))
-    }
-}
 
 /// A block of audio with its absolute position in the utterance.
 #[derive(Debug, Clone)]
@@ -256,7 +71,7 @@ pub struct Synthesizer<G: TokenPhonemizer> {
 }
 
 struct Inner<G> {
-    model: VoiceModel,
+    backend: Box<dyn VoiceBackend>,
     g2p: G,
 }
 
@@ -306,10 +121,11 @@ impl StreamingSynthesis {
 }
 
 impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
-    /// Combine a loaded voice with a phonemizer.
-    pub fn new(model: VoiceModel, g2p: G) -> Self {
+    /// Combine a loaded voice backend with a phonemizer
+    /// (see []).
+    pub fn new(backend: Box<dyn VoiceBackend>, g2p: G) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner { model, g2p })),
+            inner: Arc::new(Mutex::new(Inner { backend, g2p })),
         }
     }
 
@@ -334,7 +150,7 @@ impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
                 .inner
                 .lock()
                 .map_err(|_| anyhow!("synth lock poisoned"))?;
-            plan_document(&inner.model.config.phoneme_id_map, input)?
+            plan_document(&inner.backend.config().phoneme_id_map, input)?
         };
         let inner = Arc::clone(&self.inner);
         let (audio_tx, audio_rx) = mpsc::channel();
@@ -342,8 +158,8 @@ impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
 
         std::thread::spawn(move || {
             let Ok(mut inner) = inner.lock() else { return };
-            let Inner { model, g2p } = &mut *inner;
-            let _ = synth_worker(model, g2p, &plan, &audio_tx, &event_tx);
+            let Inner { backend, g2p } = &mut *inner;
+            let _ = synth_worker(backend.as_mut(), g2p, &plan, &audio_tx, &event_tx);
         });
 
         Ok(StreamingSynthesis {
@@ -429,14 +245,14 @@ fn push_or_attach(plan: &mut Vec<PlanItem>, marks: Vec<String>) {
 /// Worker: execute the plan, sending audio and events.
 #[allow(clippy::too_many_lines)]
 fn synth_worker<G: TokenPhonemizer>(
-    model: &mut VoiceModel,
+    model: &mut dyn VoiceBackend,
     g2p: &mut G,
     plan: &[PlanItem],
     audio_tx: &mpsc::Sender<AudioChunk>,
     event_tx: &mpsc::Sender<SynthesisEvent>,
 ) -> anyhow::Result<()> {
-    let rate = model.config.sample_rate;
-    let hop = model.config.hop_length;
+    let rate = model.config().sample_rate;
+    let hop = model.config().hop_length;
 
     let send_chunk = |samples: &[f32], offset: &mut u64| -> bool {
         for chunk in samples.chunks(CHUNK_SAMPLES) {
@@ -505,12 +321,12 @@ fn synth_worker<G: TokenPhonemizer>(
                     continue;
                 }
 
-                let (ids, groups) = build_ids(&model.config.phoneme_id_map, g2p, words);
+                let (ids, groups) = build_ids(&model.config().phoneme_id_map.clone(), g2p, words);
                 if ids.is_empty() {
                     continue;
                 }
 
-                let length_scale = model.config.length_scale / unit_rate.max(0.1);
+                let length_scale = model.config().length_scale / unit_rate.max(0.1);
                 let (audio, durations) = model.run(&ids, length_scale)?;
                 let d_ok = durations.as_ref().is_some_and(|d| d.len() == ids.len());
 
@@ -580,29 +396,37 @@ fn synth_worker<G: TokenPhonemizer>(
     Ok(())
 }
 
-/// Build the piper-style phoneme-id sequence for a word run.
+/// Build the phoneme-id sequence for a word run.
 ///
-/// Layout: `BOS, PAD, (phoneme ids…, PAD)*, EOS`, with `space, PAD` between
-/// words. Returns the ids plus each word's id range.
+/// Piper-style layout: `BOS, PAD, (phoneme ids…, PAD)*, EOS`, with
+/// `space, PAD` between words. Control symbols missing from the map
+/// (MMS alphabets have no `^`/`$`/space) are skipped instead of guessed,
+/// so those models get a flat id sequence.
 fn build_ids<G: TokenPhonemizer>(
     map: &HashMap<String, Vec<i64>>,
     g2p: &mut G,
     words: &[WordSpan],
 ) -> (Vec<i64>, Vec<std::ops::Range<usize>>) {
-    let pad = map.get(PAD).cloned().unwrap_or_else(|| vec![0]);
-    let bos = map.get(BOS).cloned().unwrap_or_else(|| vec![1]);
-    let eos = map.get(EOS).cloned().unwrap_or_else(|| vec![2]);
-    let space = map.get(" ").cloned().unwrap_or_else(|| vec![3]);
+    let pad = map.get(PAD);
+    let bos = map.get(BOS);
+    let eos = map.get(EOS);
+    let space = map.get(" ");
 
     let mut ids: Vec<i64> = Vec::new();
-    ids.extend_from_slice(&bos);
-    ids.extend_from_slice(&pad);
+    ids.extend_from_slice(bos.unwrap_or(&Vec::new()));
+    if let Some(p) = pad {
+        ids.extend_from_slice(p);
+    }
 
     let mut groups = Vec::with_capacity(words.len());
     for (wi, word) in words.iter().enumerate() {
         if wi > 0 {
-            ids.extend_from_slice(&space);
-            ids.extend_from_slice(&pad);
+            if let Some(sp) = space {
+                ids.extend_from_slice(sp);
+            }
+            if let Some(p) = pad {
+                ids.extend_from_slice(p);
+            }
         }
         let phonemes: Vec<String> = match &word.phonemes {
             Some(ph) => ph.clone(),
@@ -612,12 +436,14 @@ fn build_ids<G: TokenPhonemizer>(
         for p in &phonemes {
             if let Some(pid) = map.get(p.as_str()) {
                 ids.extend_from_slice(pid);
-                ids.extend_from_slice(&pad);
+                if let Some(p2) = pad {
+                    ids.extend_from_slice(p2);
+                }
             }
         }
         groups.push(start..ids.len());
     }
-    ids.extend_from_slice(&eos);
+    ids.extend_from_slice(eos.unwrap_or(&Vec::new()));
     (ids, groups)
 }
 

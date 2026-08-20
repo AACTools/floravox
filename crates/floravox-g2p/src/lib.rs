@@ -198,6 +198,10 @@ impl<D: AsRef<[u8]>> FstLexicon<D> {
     }
 
     /// Copy into an in-memory lexicon (detaches memory maps).
+    ///
+    /// # Panics
+    ///
+    /// Never in practice — copying an already-parsed fst cannot fail.
     #[must_use]
     pub fn to_mem(&self) -> FstLexicon<Vec<u8>> {
         FstLexicon {

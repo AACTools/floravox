@@ -13,15 +13,30 @@ floravox gives neural TTS the two things edge deployments usually lack:
    sample-accurate positions derived from the acoustic model's own duration
    tensor, not estimates.
 
+## Supported voice families
+
+| Family | Layout | Measured timings | Notes |
+|---|---|---|---|
+| piper VITS | `X.onnx` + `X.onnx.json` | yes (patched) | the original target |
+| MMS VITS | `X.onnx` + `tokens.txt` (+ `config.json`) | yes (patched) | tensor names + config auto-detected |
+| Matcha | acoustic `*.onnx` + `tokens.txt` + vocoder (`hifigan*`/`vocos*`) | yes (patched acoustic) | `sum(durations) == mel frames`, audio via vocoder |
+| kokoro / zipvoice | — | — | not wired (kokoro's per-token durations are tappable; zipvoice is prompt-conditioned flow matching) |
+
+Family, tensor naming, sample rate, and hop are discovered at load time
+(graph inputs, sibling `tokens.txt`/`config.json`, embedded ONNX metadata,
+or a piper-style `.onnx.json` sidecar).
+
 ## How the timing works
 
-Stock piper-family ONNX voices compute phoneme durations internally but
-discard them. `python/add_durations_output.py` performs graph surgery on
-any exported model — no PyTorch, no checkpoints — tapping the Ceil tensor
-into a stable `"durations"` output:
+Stock piper/MMS VITS and Matcha ONNX voices compute phoneme durations
+internally but discard them. `python/add_durations_output.py` performs
+graph surgery on any exported model — no PyTorch, no checkpoints —
+tapping the duration predictor's Ceil tensor into a stable
+`"durations"` output:
 
 ```
-sum(durations) × hop_length == audio samples   (validated exactly)
+sum(durations) × hop_length == audio samples   (VITS, validated exactly)
+sum(durations) == mel frames                   (Matcha, audio via vocoder)
 ```
 
 The Rust side folds those per-phoneme-id durations back onto word spans:
@@ -164,7 +179,10 @@ Dispatcher index-mark recipe.
 - [x] Phonetisaurus WFST OOV fallback (clean-room OpenFst reader +
       shortest-path decode, no `ort` dependency; validated against a
       1M-state CMUDict model)
-- [ ] rust-tts-wrapper engine adapter
+- [x] Multi-family voices: `VoiceBackend` trait with piper/MMS VITS and
+      Matcha+vocoder backends (family, tensor names, config auto-detected;
+      both validated live with measured timings)
+- [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch)
 - [ ] VoiceGarden-SPD module integration
 
 ## Licensing

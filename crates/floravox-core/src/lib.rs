@@ -25,11 +25,15 @@
 pub mod estimate;
 pub mod events;
 #[cfg(feature = "onnx")]
+pub mod backends;
+#[cfg(feature = "onnx")]
 pub mod synth;
 pub mod timeline;
 
 pub use events::{SynthesisEvent, WordTiming};
 pub use timeline::EventTimeline;
+#[cfg(feature = "onnx")]
+pub use backends::{load_voice, MatchaBackend, VitsBackend, VoiceBackend};
 
 /// Fold a durations tensor (mel frames per phoneme-id) into sample-accurate
 /// word timings.

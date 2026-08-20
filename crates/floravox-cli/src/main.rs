@@ -148,12 +148,12 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             )?,
             1024,
         );
-        let voice = floravox_core::synth::VoiceModel::load(&model_path)?;
+        let voice = floravox_core::load_voice(&model_path)?;
         println!(
             "model: {} Hz, {} phonemes, durations output: {}",
-            voice.config.sample_rate,
-            voice.config.phoneme_id_map.len(),
-            voice.config.has_durations
+            voice.config().sample_rate,
+            voice.config().phoneme_id_map.len(),
+            voice.config().has_durations
         );
         let synth = floravox_core::synth::Synthesizer::new(voice, cached);
         let (samples, events, rate) = synth.synthesize(&input)?;

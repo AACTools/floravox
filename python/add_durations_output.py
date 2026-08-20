@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""Patch a piper-family VITS ONNX model to expose per-id frame durations.
+"""Patch a VITS/Matcha ONNX TTS model to expose per-id frame durations.
 
-Stock piper ONNX exports compute phoneme durations internally (needed to
-build the monotonic attention) but discard them. This tool performs graph
-surgery on the exported model — no PyTorch, no checkpoints — adding the
-Ceil(w) tensor (durations in mel frames) as a stable `"durations"` output
-via an Identity node.
+Stock piper/MMS VITS and Matcha exports compute phoneme durations
+internally (needed to build the monotonic attention) but discard them.
+This tool performs graph surgery on the exported model — no PyTorch, no
+checkpoints — adding the Ceil(w) tensor (durations in mel frames) as a
+stable `"durations"` output via an Identity node.
+
+Supported families (input/output names are discovered from the graph):
+
+* piper VITS      `input`/`input_lengths` (+`scales` or split), out `output`
+* MMS VITS        `x`/`x_length` + split scales, out `y`
+* Matcha acoustic `x`/`x_length` + `noise_scale`/`length_scale`, out `mel`
+                  (validate against mel frames; audio comes from a
+                  separate vocoder)
 
 Semantics: durations[i] is the number of mel frames allocated to phoneme-id
 i of the input sequence (including pad ids). Convert to samples with
-`frame * hop_length` (default hop 256; check the voice's .onnx.json).
+`frame * hop_length` (default hop 256; check the voice's config).
 
 Based on the approach validated upstream in piper1-gpl
 (patch_voice_with_alignment.py), with two additions:
   * a stable, documented output name ("durations") via Identity node
-  * optional runtime validation that sum(durations)*hop matches the audio length
+  * optional runtime validation that sum(durations)*hop matches the audio
+    length (VITS) or the mel frame count (Matcha)
 
 Usage:
   python add_durations_output.py MODEL.onnx [-o OUT.onnx] [--hop 256] [--validate]
@@ -34,16 +43,17 @@ _LOGGER = logging.getLogger("floravox.patch")
 def find_duration_tensor(model) -> str:
     """Locate the Ceil(w) tensor feeding the attention path.
 
-    In piper VITS exports the stochastic-duration-predictor output is
-    exponentiated, scaled, and Ceil'd; that tensor both drives the CumSum
-    attention builder and sums to the mel length. There is normally exactly
-    one Ceil node in the graph.
+    In piper/MMS VITS and Matcha exports the stochastic-duration-predictor
+    output is exponentiated, scaled, and Ceil'd; that tensor both drives
+    the CumSum attention builder and sums to the mel length. Matcha graphs
+    carry a second Ceil (a length computation), so when several Ceils
+    exist the one feeding a CumSum (generate_path) wins.
     """
     ceil_outputs = [o for node in model.graph.node if node.op_type == "Ceil" for o in node.output]
     if not ceil_outputs:
         raise ValueError(
-            "No Ceil node found — this does not look like a piper VITS export. "
-            "Matcha/other architectures need their own extractor."
+            "No Ceil node found — this does not look like a piper/mms VITS "
+            "or Matcha export."
         )
     if len(ceil_outputs) > 1:
         # Prefer a Ceil whose value feeds a CumSum (generate_path).
@@ -80,6 +90,7 @@ def add_durations_output(model, tensor_name: str) -> str:
 def load_hop(model_path: Path, override: int | None) -> int:
     if override is not None:
         return override
+    # piper voice config
     cfg = model_path.with_suffix(".onnx.json")
     if cfg.exists():
         try:
@@ -89,24 +100,61 @@ def load_hop(model_path: Path, override: int | None) -> int:
                 return int(hop)
         except json.JSONDecodeError:
             pass
+    # MMS-style VITS training config
+    cfg2 = model_path.parent / "config.json"
+    if cfg2.exists():
+        try:
+            data = json.loads(cfg2.read_text())
+            hop = data.get("data", {}).get("hop_length")
+            if hop:
+                return int(hop)
+        except json.JSONDecodeError:
+            pass
     return 256
+
+
+def load_symbol_map(model_path: Path) -> dict[str, list[int]]:
+    """phoneme_id_map from a piper .onnx.json, or from a sibling tokens.txt
+    (`symbol id` lines; several spellings may share an id)."""
+    cfg = model_path.with_suffix(".onnx.json")
+    if cfg.exists():
+        try:
+            data = json.loads(cfg.read_text())
+            if data.get("phoneme_id_map"):
+                return data["phoneme_id_map"]
+        except json.JSONDecodeError:
+            pass
+    tokens = model_path.parent / "tokens.txt"
+    if tokens.exists():
+        mapping: dict[str, list[int]] = {}
+        for line in tokens.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                sym, sid = parts[0], int(parts[1])
+                # tokens.txt escapes a literal space as no symbol at all;
+                # an empty first field means the space token.
+                mapping.setdefault(sym, []).append(sid)
+        if mapping:
+            return mapping
+    return {}
 
 
 def validate(model_path: Path, hop: int) -> bool:
     """Run the patched model on a synthetic id sequence and check the
-    frame invariant: sum(durations) * hop == audio sample count."""
+    frame invariant: sum(durations) * hop == audio samples (VITS), or
+    sum(durations) == mel frames (Matcha, whose audio needs a vocoder)."""
     import numpy as np
     import onnxruntime as ort
 
-    cfg_path = model_path.with_suffix(".onnx.json")
-    phoneme_map = {}
-    if cfg_path.exists():
-        phoneme_map = json.loads(cfg_path.read_text()).get("phoneme_id_map", {})
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    input_names = [i.name for i in session.get_inputs()]
+    output_names = [o.name for o in session.get_outputs()]
+    is_matcha = "mel" in output_names
 
+    phoneme_map = load_symbol_map(model_path)
     pad = phoneme_map.get("_", [0])[0]
     bos = phoneme_map.get("^", [1])[0]
     eos = phoneme_map.get("$", [2])[0]
-    # "hello world" via letters, or fall back to BOS/EOS only.
     ids = [bos, pad]
     for symbol in "hello world":
         for pid in phoneme_map.get(symbol, []):
@@ -115,36 +163,46 @@ def validate(model_path: Path, hop: int) -> bool:
     ids.append(eos)
     ids = np.asarray([ids], dtype=np.int64)
 
-    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
-    input_names = {i.name for i in session.get_inputs()}
-    feeds: dict = {
-        "input": ids,
-        "input_lengths": np.asarray([ids.shape[1]], dtype=np.int64),
-    }
-    if "scales" in input_names:
-        # Old piper export style: one [noise_scale, length_scale, noise_scale_w] tensor.
-        feeds["scales"] = np.asarray([0.667, 1.0, 0.8], dtype=np.float32)
-    else:
-        feeds.update(
-            {
-                "noise_scale": np.asarray([0.667], dtype=np.float32),
-                "length_scale": np.asarray([1.0], dtype=np.float32),
-                "noise_scale_w": np.asarray([0.8], dtype=np.float32),
-            }
-        )
-    if "sid" in input_names:
-        feeds["sid"] = np.asarray([0], dtype=np.int64)
+    feeds: dict = {}
+    for name in input_names:
+        if name in ("input", "x"):
+            feeds[name] = ids
+        elif name in ("input_lengths", "x_length"):
+            feeds[name] = np.asarray([ids.shape[1]], dtype=np.int64)
+        elif name == "scales":
+            feeds[name] = np.asarray([0.667, 1.0, 0.8], dtype=np.float32)
+        elif name == "noise_scale":
+            feeds[name] = np.asarray([0.667], dtype=np.float32)
+        elif name == "length_scale":
+            feeds[name] = np.asarray([1.0], dtype=np.float32)
+        elif name == "noise_scale_w":
+            feeds[name] = np.asarray([0.8], dtype=np.float32)
+        elif name == "sid":
+            feeds[name] = np.asarray([0], dtype=np.int64)
+        else:
+            _LOGGER.warning("unknown input %r fed with zeros", name)
+            feeds[name] = np.zeros(1, dtype=np.float32)
 
-    results = session.run(["output", "durations"], feeds)
-    audio, durations = results[0], results[1]
-    audio_len = audio.shape[-1]
+    main_out = "mel" if is_matcha else ("y" if "y" in output_names else "output")
+    results = session.run([main_out, "durations"], feeds)
+    main, durations = results[0], results[1]
     frames = int(durations.reshape(-1).sum())
-    predicted = frames * hop
-    ok = abs(predicted - audio_len) <= hop  # allow one frame of rounding
-    _LOGGER.info(
-        "validation: %d frames * hop %d = %d samples vs audio %d samples → %s",
-        frames, hop, predicted, audio_len, "OK" if ok else "MISMATCH",
-    )
+
+    if is_matcha:
+        mel_frames = main.shape[-1]
+        ok = abs(frames - mel_frames) <= 1
+        _LOGGER.info(
+            "validation (matcha): %d duration frames vs %d mel frames → %s",
+            frames, mel_frames, "OK" if ok else "MISMATCH",
+        )
+    else:
+        audio_len = main.shape[-1]
+        predicted = frames * hop
+        ok = abs(predicted - audio_len) <= hop  # allow one frame of rounding
+        _LOGGER.info(
+            "validation: %d frames * hop %d = %d samples vs audio %d samples → %s",
+            frames, hop, predicted, audio_len, "OK" if ok else "MISMATCH",
+        )
     return ok
 
 
