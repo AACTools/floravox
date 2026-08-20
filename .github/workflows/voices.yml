@@ -234,6 +234,29 @@ jobs:
           print("kokoro rate OK: last sample", end)
           EOF
 
+      - name: Synthesize — MMS Hindi (native script, --chars)
+        run: |
+          set -euxo pipefail
+          mkdir -p "$MODELS/mms-hin"
+          for f in model.onnx tokens.txt; do
+            curl -sL -o "$MODELS/mms-hin/$f" \
+              "https://huggingface.co/willwade/mms-tts-multilingual-models-onnx/resolve/main/hin/$f"
+          done
+          cp "$MODELS/mms-hin/model.onnx" "$MODELS/mms-hin/model-patched.onnx"
+          python python/add_durations_output.py "$MODELS/mms-hin/model-patched.onnx" --validate
+          cargo run -q -p floravox-cli -- synth \
+            --model "$MODELS/mms-hin/model-patched.onnx" --chars \
+            --text '<speak>नमस्ते दुनिया कैसी है</speak>' \
+            --out "$MODELS/out/mms-hin.wav" --events "$MODELS/out/mms-hin.json"
+          python - "$MODELS/out/mms-hin.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          assert len(words) == 4, words
+          assert all(not w["estimated"] for w in words), "mms-hin timings must be measured"
+          print("mms-hin OK:", [(w["text"], w["ms_start"]) for w in words])
+          EOF
+
       - name: Phonetisaurus real-model decode (env-gated test)
         env:
           PHONETISAURUS_MODEL: ${{ github.workspace }}/models/phonetisaurus.fst

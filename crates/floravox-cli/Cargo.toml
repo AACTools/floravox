@@ -14,9 +14,10 @@ name = "floravox"
 path = "src/main.rs"
 
 [features]
-default = ["onnx", "misaki"]
+default = ["onnx", "misaki", "uroman"]
 onnx = ["floravox-core/onnx", "floravox-g2p/onnx"]
 misaki = ["floravox-core/misaki"]
+uroman = ["floravox-core/uroman"]
 
 [dependencies]
 floravox-core.workspace = true

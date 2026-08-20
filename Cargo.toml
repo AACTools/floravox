@@ -10,7 +10,7 @@ members = [
 
 [workspace.package]
 readme = "README.md"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/AACTools/floravox"
@@ -18,9 +18,9 @@ keywords = ["tts", "ssml", "speech", "accessibility", "phonemizer"]
 categories = ["accessibility", "text-processing", "multimedia::audio"]
 
 [workspace.dependencies]
-floravox-ssml = { path = "crates/floravox-ssml", version = "0.6.1" }
-floravox-g2p = { path = "crates/floravox-g2p", version = "0.6.1" }
-floravox-core = { path = "crates/floravox-core", version = "0.6.1" }
+floravox-ssml = { path = "crates/floravox-ssml", version = "0.7.0" }
+floravox-g2p = { path = "crates/floravox-g2p", version = "0.7.0" }
+floravox-core = { path = "crates/floravox-core", version = "0.7.0" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -12,6 +12,10 @@ All floravox crates are dual-licensed Apache-2.0 OR MIT. Dependencies:
 | ort           | MIT OR Apache-2.0    | links ONNX Runtime (MIT)       |
 | serde/anyhow  | MIT OR Apache-2.0    |                                |
 | misaki-rs     | MIT                  | default-features = false — its |
+| uroman tables | Apache-2.0           | vendored from isi-nlp/uroman   |
+|               |                      | (data/, + their LICENSE.txt);  |
+|               |                      | a Rust reimplementation, no    |
+|               |                      | uroman code is linked          |
 |               |                      | optional espeak fallback (GPL) |
 |               |                      | is NOT enabled                 |
 

@@ -97,14 +97,16 @@ The crate's optional espeak fallback is switched off because it would link GPL c
 
 Non-English piper voices use lexicon bundles from [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons). The lexicons come from gruut, the phonemizer those voices were trained with, so the symbols line up; tested on German, 236,000 sampled symbols, none failed to resolve.
 
-MMS voices (1,100+ languages) take romanized characters rather than phonemes, so they need no lexicon at all:
+MMS voices (1,100+ languages) take characters rather than phonemes, so they need no lexicon at all. Their `tokens.txt` is a character inventory in the language's own script (Hindi voices list Devanagari, Russian voices Cyrillic):
 
 ```console
-cargo run -p floravox-cli -- synth --model mms-voice.onnx --chars \
-  --text '<speak>bonjour le monde</speak>' --out out.wav --events events.json
+cargo run -p floravox-cli -- synth --model mms-hin.onnx --chars \
+  --text '<speak>नमस्ते दुनिया</speak>' --out out.wav --events events.json
 ```
 
-`--chars` lowercases the text and feeds each character through the voice's own `tokens.txt` (all characters of the test sentence resolve; timings stay measured). Non-Latin scripts need romanization first; porting [uroman](https://github.com/isi-nlp/uroman) (Apache-2.0) is the planned follow-up.
+`--chars` feeds each character through the voice's own table (timings stay measured; verified end to end on Hindi and French MMS voices).
+
+When the input script differs from what the voice expects, add `--romanize [lang]`: a Rust port of [uroman](https://github.com/isi-nlp/uroman) (Apache-2.0 tables vendored) converts any script to Latin first. It reproduces the reference on 58/60 test words across Cyrillic, Greek, Hebrew, Devanagari, Bengali, Tamil, Telugu, Malayalam, Ethiopic, Arabic, and Korean (Hangul is algorithmic); Han characters are the known gap (needs the pinyin reading table).
 
 ```console
 python python/gruut2tsv.py lexicon.db de_DE.tsv
@@ -175,9 +177,26 @@ Against the [sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts
       German reference 93.6% exact / PER 1.4% on held-out words; models
       ship in the voicegarden-lexicons bundles with metrics in the
       manifest)
-- [ ] Languages beyond gruut's thirteen (ByT5 where no lexicon exists)
+- [x] uroman romanization port (`floravox-g2p` `uroman` feature, default
+      on; 58/60 agreement with the reference across 11 scripts; Hangul
+      algorithmic; Han documented gap)
+- [ ] MMS coverage beyond spot checks (Hindi, French verified; the
+      1,100-voice set needs a CI sweep)
+- [ ] ByT5 remains a user-supplied fallback engine for languages with
+      neither a lexicon nor a character voice
 - [ ] rust-tts-wrapper engine adapter (branch `floravox-engine` exists, tracks an older floravox and needs a bump)
 - [ ] VoiceGarden-SPD module integration
+
+## Where language data lives
+
+floravox itself ships no lexicon data: all published lexicons and
+trained models live in
+[voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons),
+and the CLI takes them by path. Three embedded data blobs are not
+lexicons: misaki's English dictionaries (inside the MIT `misaki-rs`
+dependency), the universal letter-name spelling fallback, and uroman's
+romanization tables (Apache-2.0, script conversion rather than
+pronunciation).
 
 ## Licensing
 

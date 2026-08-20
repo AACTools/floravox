@@ -141,6 +141,10 @@ pub trait DocumentPhonemizer: Send {
 pub struct CharFrontend {
     /// Lowercase input first (character inventories are mostly lowercase).
     pub lowercase: bool,
+    /// Romanize input with uroman first (non-Latin scripts -> Latin
+    /// characters). An optional ISO 639-3 code selects language-specific
+    /// rules.
+    pub romanize: Option<&'static str>,
 }
 
 impl DocumentPhonemizer for CharFrontend {
@@ -149,10 +153,18 @@ impl DocumentPhonemizer for CharFrontend {
             if w.phonemes.is_some() || w.say_as == floravox_ssml::SayAs::Characters {
                 continue;
             }
-            let text = if self.lowercase {
-                w.spoken.to_lowercase()
+            #[cfg(feature = "uroman")]
+            let text = if let Some(lang) = self.romanize {
+                floravox_g2p::uroman::romanize(&w.spoken, Some(lang))
             } else {
                 w.spoken.clone()
+            };
+            #[cfg(not(feature = "uroman"))]
+            let text = w.spoken.clone();
+            let text = if self.lowercase {
+                text.to_lowercase()
+            } else {
+                text
             };
             let chars: Vec<String> = text.chars().map(|c| c.to_string()).collect();
             if !chars.is_empty() {
@@ -839,7 +851,11 @@ mod tests {
             voice: None,
         };
         let mut words = vec![mk("Bonjour"), mk("le")];
-        CharFrontend { lowercase: true }.assign_phonemes(&mut words);
+        CharFrontend {
+            lowercase: true,
+            romanize: None,
+        }
+        .assign_phonemes(&mut words);
         assert_eq!(
             words[0].phonemes,
             Some(
@@ -854,7 +870,11 @@ mod tests {
         );
         // existing phonemes (SSML overrides) are left alone
         words[0].phonemes = Some(vec!["x".into()]);
-        CharFrontend { lowercase: true }.assign_phonemes(&mut words);
+        CharFrontend {
+            lowercase: true,
+            romanize: None,
+        }
+        .assign_phonemes(&mut words);
         assert_eq!(words[0].phonemes, Some(vec!["x".into()]));
     }
 

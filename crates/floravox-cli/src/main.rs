@@ -113,6 +113,8 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut byt5_decoder: Option<String> = None;
     let mut misaki: Option<String> = None;
     let mut chars = false;
+    #[cfg(feature = "uroman")]
+    let mut romanize: Option<String> = None;
     let mut out_wav = "out.wav".to_string();
     let mut out_events = "events.json".to_string();
     let mut i = 0;
@@ -129,6 +131,24 @@ fn cmd_synth(args: &[String]) -> Result<()> {
                 chars = true;
                 i += 1;
                 continue;
+            }
+            #[cfg(feature = "uroman")]
+            "--romanize" => {
+                romanize = match args.get(i + 1) {
+                    Some(v) if !v.starts_with("--") => {
+                        i += 2;
+                        Some(v.clone())
+                    }
+                    _ => {
+                        i += 1;
+                        Some(String::new())
+                    }
+                };
+                continue;
+            }
+            #[cfg(not(feature = "uroman"))]
+            "--romanize" => {
+                bail!("floravox-cli was built without the uroman feature");
             }
             "--misaki" => {
                 let lang = args.get(i + 1).map(|s| s.to_ascii_lowercase());
@@ -189,10 +209,31 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             bail!("floravox-cli was built without the misaki feature");
         }
         if chars {
-            synth = synth.with_document_phonemizer(Box::new(floravox_core::synth::CharFrontend {
+            // --romanize [LANG]: uroman first (any script -> Latin),
+            // optional ISO 639-3 code for language-specific rules.
+            #[cfg(feature = "uroman")]
+            let rom: Option<&'static str> = romanize.as_deref().map(|l| {
+                if l.is_empty() {
+                    ""
+                } else {
+                    l.to_string().leak()
+                }
+            });
+            #[allow(unused_mut)]
+            let mut frontend = floravox_core::synth::CharFrontend {
                 lowercase: true,
-            }));
-            println!("frontend: characters (lowercased)");
+                romanize: None,
+            };
+            #[cfg(feature = "uroman")]
+            {
+                frontend.romanize = rom;
+            }
+            synth = synth.with_document_phonemizer(Box::new(frontend));
+            if romanize.is_some() {
+                println!("frontend: characters (romanized)");
+            } else {
+                println!("frontend: characters (lowercased)");
+            }
         }
         let (samples, events, rate) = synth.synthesize(&input)?;
         write_wav(&out_wav, &samples, rate)?;

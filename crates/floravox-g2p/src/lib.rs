@@ -44,6 +44,8 @@ use std::sync::Arc;
 
 pub mod ingest;
 pub mod misaki;
+#[cfg(feature = "uroman")]
+pub mod uroman;
 
 #[cfg(feature = "onnx")]
 pub mod byt5;

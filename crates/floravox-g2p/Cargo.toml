@@ -10,11 +10,14 @@ categories.workspace = true
 readme.workspace = true
 
 [features]
-default = ["misaki"]
+default = ["misaki", "uroman"]
 onnx = ["dep:ort"]
 # misaki G2P (the phonemizer Kokoro was trained with). MIT, fully
 # self-contained; the crate's espeak fallback is NOT enabled (GPL).
 misaki = ["dep:misaki-rs"]
+# uroman romanization (any script -> Latin), ported from isi-nlp/uroman
+# (Apache-2.0); vendored tables add ~1 MB of embedded data.
+uroman = []
 
 [dependencies]
 fst.workspace = true
