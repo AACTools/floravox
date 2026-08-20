@@ -33,6 +33,8 @@ floravox folds those phoneme durations back onto the words they belong to. Every
 | Matcha | acoustic `*.onnx` + `tokens.txt` + vocoder (`hifigan*` or `vocos*`) | yes, after patching the acoustic model | audio comes from the vocoder |
 | Kokoro | `model.onnx` + `tokens.txt` + `voices.bin` | yes, after patching | 11 voices in en-v0.19, native speed control, `sum(durations) × 600 == samples` holds at every speed |
 | zipvoice | not supported | no | it is a cloning model with no usable duration tensor |
+| Higgs Audio v2/v3 | not supported | no | audio-LM (Qwen3-4B backbone + codec tokenizer): autoregressive decode with no duration tensor, so timings would be estimates only; the community ONNX export ([onnx-community](https://huggingface.co/onnx-community/higgs-audio-v3-tts-4b)) has only verified the LLM sub-part so far, and its INT4 decoder alone is 2.2 GB. Its control tags (`<|prosody:speed_very_slow|>`, `<|sfx:laughter|>`, `<|emotion:...|>`) map naturally onto W3C SSML (`<prosody rate>`, `<break>`, emphasis) — the right layer for that translation is an engine adapter (the same dialect mapping rust-tts-wrapper already does for Azure), if a backend ever lands |
+| kitten / pocket / supertonic | not supported | no | language-model decoders with no duration tensor |
 
 You point `--model` at a directory or file and floravox works out which family it is, what the tensors are called, the sample rate, and the hop size. It reads the graph inputs, a sibling `tokens.txt` or `config.json`, ONNX metadata, or a piper-style `.onnx.json`, whichever is present.
 
