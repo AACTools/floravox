@@ -2,7 +2,7 @@
 
 floravox is a text-to-speech engine written in Rust. You give it text and a voice model; it gives you audio plus the exact moment each word starts and ends.
 
-It was built for the [VoiceGarden](https://github.com/AACTools) assistive-speech products, and for anyone who needs offline TTS with precise timing. The code is dual-licensed Apache-2.0 OR MIT. It is pure Rust, needs no Python runtime, and links no GPL code.
+It grew out of [VoiceGarden](https://github.com/AACTools), a foundational speech system working toward high-quality text-to-speech for every language, and it serves anyone who needs offline TTS with precise timing. The code is dual-licensed Apache-2.0 OR MIT. It is pure Rust, needs no Python runtime, and links no GPL code.
 
 ## The problem it solves
 
