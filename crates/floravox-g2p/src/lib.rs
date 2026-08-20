@@ -13,6 +13,9 @@
 //! Wrap any phonemizer in a bounded [`CachedPhonemizer`] so repeated words
 //! (the common case in AAC and screen-reader workloads) cost one hash lookup.
 //!
+//! The [`ingest`] module converts third-party pronunciation data (CMUDICT,
+//! WikiPron / gruut extractions) into rows for [`LexiconWriter`].
+//!
 //! On-disk format: a lexicon "stem" is two files — `stem.fst` (word →
 //! packed `offset/length` u64) and `stem.pho` (a flat blob of
 //! space-separated phoneme strings). Both are mmap'd at open time.
@@ -37,6 +40,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+pub mod ingest;
+
+pub use ingest::{Ingested, SourceFormat};
 
 /// One pronunciation symbol (IPA-ish, model-specific alphabet).
 pub type Phoneme = String;
@@ -365,6 +372,12 @@ fn word_core(token: &str) -> Option<&str> {
 pub trait TokenPhonemizer {
     /// Phonemize one whitespace token.
     fn phonemize_token(&mut self, token: &str) -> Vec<Phoneme>;
+}
+
+impl<P: TokenPhonemizer + ?Sized> TokenPhonemizer for Box<P> {
+    fn phonemize_token(&mut self, token: &str) -> Vec<Phoneme> {
+        (**self).phonemize_token(token)
+    }
 }
 
 impl<D: AsRef<[u8]>, F: OovFallback> TokenPhonemizer for LexiconPhonemizer<D, F> {

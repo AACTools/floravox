@@ -39,7 +39,9 @@ fn print_help() {
          USAGE:\n  \
          floravox timeline [INPUT]          dump parsed segments & word spans\n  \
          floravox synth --model M --text T  synthesize to out.wav + events.json\n\n\
-         timeline reads stdin when INPUT is absent or `-`."
+         timeline reads stdin when INPUT is absent or `-`.\n\
+         synth also takes --lexicon STEM (compiled stem.fst/.pho) and\n\
+         --file F for input text."
     );
 }
 
@@ -101,6 +103,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut model: Option<String> = None;
     let mut text: Option<String> = None;
     let mut text_file: Option<String> = None;
+    let mut lexicon_stem: Option<String> = None;
     let mut out_wav = "out.wav".to_string();
     let mut out_events = "events.json".to_string();
     let mut i = 0;
@@ -109,6 +112,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             "--model" => model = args.get(i + 1).cloned(),
             "--text" => text = args.get(i + 1).cloned(),
             "--file" => text_file = args.get(i + 1).cloned(),
+            "--lexicon" => lexicon_stem = args.get(i + 1).cloned(),
             "--out" => out_wav = args.get(i + 1).cloned().unwrap_or(out_wav),
             "--events" => out_events = args.get(i + 1).cloned().unwrap_or(out_events),
             other => bail!("unknown synth flag {other:?}"),
@@ -126,9 +130,24 @@ fn cmd_synth(args: &[String]) -> Result<()> {
 
     #[cfg(feature = "onnx")]
     {
-        let lexicon = floravox_g2p::FstLexicon::from_rows(Vec::new())?;
-        let g2p =
-            floravox_g2p::LexiconPhonemizer::new(lexicon, floravox_g2p::RuleFallback::default());
+        // Lexicon-backed phonemizer when a stem is given; empty lexicon
+        // (everything spelled out by the fallback) otherwise.
+        let g2p: Box<dyn floravox_g2p::TokenPhonemizer + Send> =
+            match &lexicon_stem {
+                Some(stem) => {
+                    let lexicon = floravox_g2p::MmapLexicon::open(stem)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    println!("lexicon: {stem}.fst/.pho ({} entries)", lexicon.len());
+                    Box::new(floravox_g2p::LexiconPhonemizer::new(
+                        lexicon,
+                        floravox_g2p::RuleFallback::default(),
+                    ))
+                }
+                None => Box::new(floravox_g2p::LexiconPhonemizer::new(
+                    floravox_g2p::FstLexicon::from_rows(Vec::new())?,
+                    floravox_g2p::RuleFallback::default(),
+                )),
+            };
         let cached = floravox_g2p::CachedPhonemizer::new(g2p, 1024);
         let voice = floravox_core::synth::VoiceModel::load(&model_path)?;
         println!(
@@ -167,7 +186,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     }
     #[cfg(not(feature = "onnx"))]
     {
-        let _ = (model_path, input, out_wav, out_events);
+        let _ = (model_path, input, out_wav, out_events, lexicon_stem);
         bail!("floravox-cli was built without the `onnx` feature");
     }
 }
