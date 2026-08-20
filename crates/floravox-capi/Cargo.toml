@@ -1,0 +1,27 @@
+[package]
+name = "floravox-capi"
+description = "C ABI for floravox G2P — the permissively-licensed espeak-ng replacement, callable from C/C++, Python, Node, Java, C#, Go, Dart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
+
+[lib]
+# cdylib: loadable shared library (ctypes/ffi/dlopen).
+# staticlib: linkable into C/C++ binaries.
+# lib: so doctests/links in Rust consumers.
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[dependencies]
+floravox-g2p.workspace = true
+memmap2 = "0.9"
+voicegarden-lexicons = "0.1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

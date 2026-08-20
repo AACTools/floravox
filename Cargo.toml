@@ -5,6 +5,7 @@ members = [
     "crates/floravox-g2p",
     "crates/floravox-core",
     "crates/floravox-cli",
+    "crates/floravox-capi",
 ]
 
 [workspace.package]
