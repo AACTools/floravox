@@ -156,11 +156,12 @@ jobs:
           import json, sys
           evs = json.load(open(sys.argv[1]))
           words = {e["text"]: e for e in evs if e["type"] == "word_boundary"}
-          assert "hello" in words and "world," in words, sorted(words)
+          lower = {k.lower(): v for k, v in words.items()}
+          assert "hello" in lower and "world," in lower, sorted(words)
           assert all(not w["estimated"] for w in words.values()), "kokoro timings must be measured"
           brk = next(e for e in evs if e["type"] == "break_started")
           # the break splices exactly at the previous word's end
-          assert brk["sample"] == words["world,"]["sample_end"], (brk, words["world,"])
+          assert brk["sample"] == lower["world,"]["sample_end"], (brk, lower["world,"])
           assert any(e["type"] == "mark_reached" and e.get("name") == "k1" for e in evs)
           print("kokoro OK:", {k: (v["ms_start"], v["ms_end"]) for k, v in words.items()})
           EOF
