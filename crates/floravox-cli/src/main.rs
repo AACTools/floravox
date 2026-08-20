@@ -305,7 +305,7 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
 
     // Full production stack when both are given (lexicon hit = in-vocab;
     // miss = phonetisaurus, else letter spelling); bare --phonetisaurus
-    // queries the WFST alone.
+    // queries the WFST alone; bare --lexicon is the lexicon + spelling.
     if let (Some(stem), Some(lex)) = (&phonetisaurus_stem, &lexicon_stem) {
         let model =
             floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -326,8 +326,18 @@ fn cmd_g2p(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
+    if let Some(lex) = &lexicon_stem {
+        let lexicon = floravox_g2p::MmapLexicon::open(lex).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut g2p =
+            floravox_g2p::LexiconPhonemizer::new(lexicon, floravox_g2p::RuleFallback::default());
+        eprintln!("lexicon: {} entries + spelling", g2p.lexicon_len());
+        for word in &words {
+            println!("{word}\t{}", g2p.phonemize_word(word).join(" "));
+        }
+        return Ok(());
+    }
     let Some(stem) = &phonetisaurus_stem else {
-        bail!("g2p requires --phonetisaurus STEM (model.fst + tables)");
+        bail!("g2p requires --phonetisaurus STEM or --lexicon STEM");
     };
     let model = floravox_g2p::PhonetisaurusG2p::open(stem).map_err(|e| anyhow::anyhow!("{e}"))?;
     eprintln!(
