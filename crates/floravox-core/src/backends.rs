@@ -142,9 +142,23 @@ impl GraphNames {
 /// no phoneme map can be built.
 pub fn load_voice(path: impl AsRef<Path>) -> anyhow::Result<Box<dyn VoiceBackend>> {
     let onnx = resolve_onnx(path.as_ref())?;
-    let session = ort::session::Session::builder()?
+    let mut builder = ort::session::Session::builder()?
         .with_intra_threads(intra_threads())
-        .map_err(|e| anyhow!("thread config: {e}"))?
+        .map_err(|e| anyhow!("thread config: {e}"))?;
+    if std::env::var_os("FLORAVOX_NO_MEM_PATTERN").is_some() {
+        builder = builder
+            .with_memory_pattern(false)
+            .map_err(|e| anyhow!("mem pattern: {e}"))?;
+    }
+    if std::env::var_os("FLORAVOX_NO_ARENA").is_some() {
+        // Plain malloc/free per allocation: peak RSS tracks the live
+        // working set instead of the arena high-water mark, at a small
+        // allocation cost.
+        builder = builder
+            .with_config_entry("session.disable_cpu_arena", "1")
+            .map_err(|e| anyhow!("arena config: {e}"))?;
+    }
+    let session = builder
         .commit_from_file(&onnx)
         .with_context(|| format!("loading {}", onnx.display()))?;
     let names = GraphNames::of(&session);
