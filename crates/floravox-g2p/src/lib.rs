@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub mod ingest;
+pub mod misaki;
 
 #[cfg(feature = "onnx")]
 pub mod byt5;
@@ -51,6 +52,7 @@ pub mod phonetisaurus;
 #[cfg(feature = "onnx")]
 pub use byt5::Byt5G2p;
 pub use ingest::{Ingested, SourceFormat};
+pub use misaki::MisakiG2p;
 pub use phonetisaurus::PhonetisaurusG2p;
 
 /// One pronunciation symbol (IPA-ish, model-specific alphabet).
@@ -406,7 +408,8 @@ impl<D: AsRef<[u8]>, F: OovFallback> LexiconPhonemizer<D, F> {
 
 /// Pause symbols emitted for punctuation, matching the piper phoneme
 /// alphabet convention (`,` = short pause, `.` = long pause, `-` = break).
-fn punct_phonemes(token: &str) -> Vec<Phoneme> {
+#[must_use]
+pub fn punct_phonemes(token: &str) -> Vec<Phoneme> {
     let mut out = Vec::new();
     for ch in token.chars() {
         match ch {
@@ -420,7 +423,8 @@ fn punct_phonemes(token: &str) -> Vec<Phoneme> {
 }
 
 /// Strip punctuation from a token, returning the alphanumeric core.
-fn word_core(token: &str) -> Option<&str> {
+#[must_use]
+pub fn word_core(token: &str) -> Option<&str> {
     let core: &str = token.trim_matches(|c: char| !c.is_alphanumeric());
     (!core.is_empty()).then_some(core)
 }

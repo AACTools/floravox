@@ -11,9 +11,15 @@ All floravox crates are dual-licensed Apache-2.0 OR MIT. Dependencies:
 | memmap2       | MIT OR Apache-2.0    |                                |
 | ort           | MIT OR Apache-2.0    | links ONNX Runtime (MIT)       |
 | serde/anyhow  | MIT OR Apache-2.0    |                                |
+| misaki-rs     | MIT                  | default-features = false — its |
+|               |                      | optional espeak fallback (GPL) |
+|               |                      | is NOT enabled                 |
 
 No GPL/LGPL code is linked — the espeak-ng licensing problem that
-motivated gruut does not arise here.
+motivated gruut does not arise here. (misaki-rs's pronunciation
+dictionary includes corrections derived from espeak output; that is
+data provenance, the same class as kokoro's own training data, and the
+crate links no espeak code with the fallback feature off.)
 
 ## Data artifacts (each carries its own license)
 

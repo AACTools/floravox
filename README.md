@@ -23,10 +23,6 @@ floravox gives neural TTS the two things edge deployments usually lack:
 | Kokoro | `model.onnx` + `tokens.txt` + `voices.bin` | yes (patched) | StyleTTS2; `sum(durations) × 600 == samples`, native `speed` rate control, length-conditioned style bank (`speaker × len` slices), 11 voices per en-v0.19 via `voices.bin` slots |
 | zipvoice | — | — | not wired (prompt-conditioned flow matching; its only Ceil is clone-prompt alignment) |
 
-Kokoro's phoneme alphabet is the misaki/espeak character set — until a
-misaki-compatible G2P lands, drive it with SSML `<phoneme>` overrides
-(one symbol per character).
-
 Family, tensor naming, sample rate, and hop are discovered at load time
 (graph inputs, sibling `tokens.txt`/`config.json`, embedded ONNX metadata,
 or a piper-style `.onnx.json` sidecar).
@@ -164,14 +160,15 @@ cargo run -p floravox-cli -- g2p --lexicon en_US \
   front-loads ~128 ms. UIs that highlight from the first word's start
   should account for leading silence until trimmed.
 - **`audit_g2p.py`** — compares the G2P stack's output against
-  `espeak-ng --ipa` (the phonemizer piper voices were trained with).
-  Current status: 17% exact symbol match, median edit distance 2. The
-  divergences are systematic, not random — diphthong splitting
-  (`eɪ` vs espeak's `e ɪ`), stress placement (vowel vs syllable onset),
-  function-word reductions in CMUDict — so **validating against a real
-  voice's `phoneme_id_map` (the model's actual inventory) is the open
-  item before trusting end-to-end English phonemization**. SSML
-  `<phoneme>` overrides bypass all of this.
+  `espeak-ng --ipa`. Raw string comparison shows 17% exact match,
+  median edit distance 2 — but the divergences are *dictionary dialect*,
+  not errors: diphthong composition (`eɪ` vs `e ɪ`), stress placement,
+  CMUDict function-word reductions. **The metric that matters is symbol
+  inventory coverage against a real voice's `phoneme_id_map`**: with
+  compound-symbol resolution, CMUDict+phonetisaurus output covers 100%
+  of `en_US-lessac-low`'s 154-symbol inventory (was 80% — every
+  diphthong dropped). Misaki output covers 100% of kokoro's 177-symbol
+  inventory after normalization.
 
 ## Voice registry compatibility
 
@@ -190,6 +187,38 @@ Registry consumption (download, verify, list, language routing) belongs
 in rust-tts-wrapper; floravox stays a synthesis engine that takes local
 files. The gating factor for *correct* non-English synthesis is
 per-language G2P (below).
+
+## G2P: misaki (Kokoro's own phonemizer)
+
+English synthesis defaults to document-level
+[misaki](https://github.com/hexgrad/misaki) — the POS-aware phonemizer
+Kokoro voices were trained with — via the self-contained Rust port
+[`misaki-rs`](https://crates.io/crates/misaki-rs) (MIT, dictionaries and
+tagger weights compiled in; its optional espeak fallback is **not**
+enabled, keeping the tree GPL-free). Sentence context means heteronyms
+(*object* noun vs verb) and numbers ("123 dollars") are phonemized
+correctly; output is normalized to espeak-style char inventories
+(zero-width joiners split, `ᵊ` → `ə`):
+
+```console
+cargo run -p floravox-cli -- synth --model kokoro-model.onnx --misaki us \
+  --text '<speak>Hello world</speak>' --out out.wav --events events.json
+```
+
+`--misaki gb` selects British English (kokoro `bf_*` voices). Behind it
+the per-word chain still applies to anything unassigned. Disable the
+whole feature with `default-features = false` (~9 MB smaller).
+
+## Symbol resolution
+
+Lexicons and G2P engines emit composed symbols (`oʊ`, `aɪ`, `ɜː`, `ɝ`);
+espeak-style voice inventories spell them as separate symbols
+(`o`+`ʊ`, …). `build_ids` resolves each symbol against the voice's map —
+direct hit, small substitution table (`ɝ` → `ɜ` + `˞`), then per-character
+split. Before this, mismatched symbols were silently dropped: **20% of
+symbols** on a CMUDict-fed sample (every diphthong — "night" lost its
+vowel). After: **0% dropped** on the same sample against
+`en_US-lessac-low`'s 154-symbol inventory.
 
 ## Quick start
 
@@ -245,16 +274,20 @@ Dispatcher index-mark recipe.
       auto-detected; all validated live with measured timings)
 - [x] CI: fast checks every push (fmt/clippy/3-platform tests) + live
       voice-matrix workflow against real downloaded models
-- [ ] **Per-language G2P** — the English stack (CMUDict + ARPABET→IPA +
-      phonetisaurus) serves ~165 English voices; German (53), French (29),
-      Polish (27), Dutch (25) and the rest of the ~1,746 drivable voices
-      need per-language lexicons/WFSTs (gruut MIT lexicons and WikiPron +
-      phonetisaurus training are the intended sources — the `ingest`
-      module and `OovFallback` chain are ready for them). MMS voices want
-      per-language *character* frontends (transliteration-style), which is
-      simpler than phonemization.
-- [ ] G2P symbol-inventory validation against real voices'
-      `phoneme_id_map`s (see Accuracy evaluation)
+- [x] English G2P complete: document-level misaki pre-pass (default
+      feature; POS-aware, numbers, en-us/en-gb; 100% inventory coverage on
+      kokoro) + CMUDict/phonetisaurus chain (100% coverage on piper after
+      the compound-symbol resolution fix — was 80% with diphthongs
+      silently dropped)
+- [ ] **Per-language G2P beyond English** — German (53 voices), French
+      (29), Polish (27), Dutch (25) and the rest of the ~1,746 drivable
+      voices need per-language lexicons/WFSTs (gruut MIT lexicons and
+      WikiPron + phonetisaurus training are the intended sources — the
+      `ingest` module, `OovFallback` chain, and `DocumentPhonemizer`
+      trait are ready for them). MMS voices want per-language *character*
+      frontends (transliteration-style), which is simpler than
+      phonemization. ByT5 stays the zero-data option behind the existing
+      trait for languages where no lexicon exists.
 - [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch, tracking
       floravox v0.4.0) + sherpa-onnx-tts-models registry routing
 - [ ] VoiceGarden-SPD module integration

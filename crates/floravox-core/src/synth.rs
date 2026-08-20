@@ -117,6 +117,39 @@ pub struct Synthesizer<G: TokenPhonemizer> {
 struct Inner<G> {
     backend: Box<dyn VoiceBackend>,
     g2p: G,
+    pre_pass: Option<Box<dyn DocumentPhonemizer>>,
+}
+
+/// Document-level phonemizer: assigns phonemes to a run of words with
+/// sentence context. POS-aware engines (misaki) need whole sentences to
+/// disambiguate heteronyms and expand numbers; per-word `TokenPhonemizer`
+/// calls cannot provide that.
+///
+/// Assignments only fill words whose `phonemes` are still `None` (SSML
+/// `<phoneme>` overrides always win) and skip character-mode `say-as`.
+pub trait DocumentPhonemizer: Send {
+    /// Fill `word.phonemes` for the run (in place).
+    fn assign_phonemes(&mut self, words: &mut [WordSpan]);
+}
+
+/// [`DocumentPhonemizer`] backed by [`floravox_g2p::MisakiG2p`] (feature
+/// `misaki`) — the phonemizer Kokoro voices were trained with.
+#[cfg(feature = "misaki")]
+pub struct MisakiPrePass(pub floravox_g2p::MisakiG2p);
+
+#[cfg(feature = "misaki")]
+impl DocumentPhonemizer for MisakiPrePass {
+    fn assign_phonemes(&mut self, words: &mut [WordSpan]) {
+        let texts: Vec<&str> = words.iter().map(|w| w.spoken.as_str()).collect();
+        let results = self.0.phonemize_words(&texts);
+        for (w, ph) in words.iter_mut().zip(results) {
+            if w.phonemes.is_none() && w.say_as != floravox_ssml::SayAs::Characters {
+                if let Some(p) = ph.filter(|p| !p.is_empty()) {
+                    w.phonemes = Some(p);
+                }
+            }
+        }
+    }
 }
 
 /// One planned synthesis step.
@@ -169,8 +202,28 @@ impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
     /// (see []).
     pub fn new(backend: Box<dyn VoiceBackend>, g2p: G) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(Inner { backend, g2p })),
+            inner: Arc::new(Mutex::new(Inner {
+                backend,
+                g2p,
+                pre_pass: None,
+            })),
         }
+    }
+
+    /// Attach a document-level phonemizer pre-pass (e.g.
+    /// [`MisakiPrePass`]); it runs before the per-word chain on every
+    /// same-rate word run.
+    /// # Panics
+    ///
+    /// Panics when the internal lock is poisoned (only possible after a
+    /// panicked worker thread).
+    #[must_use]
+    pub fn with_document_phonemizer(self, pre_pass: Box<dyn DocumentPhonemizer>) -> Self {
+        self.inner
+            .lock()
+            .expect("freshly constructed synthesizer is unlocked")
+            .pre_pass = Some(pre_pass);
+        self
     }
 
     /// Synthesize to completion in memory: `(samples, events, sample_rate)`.
@@ -202,8 +255,19 @@ impl<G: TokenPhonemizer + Send + 'static> Synthesizer<G> {
 
         std::thread::spawn(move || {
             let Ok(mut inner) = inner.lock() else { return };
-            let Inner { backend, g2p } = &mut *inner;
-            let _ = synth_worker(backend.as_mut(), g2p, &plan, &audio_tx, &event_tx);
+            let Inner {
+                backend,
+                g2p,
+                pre_pass,
+            } = &mut *inner;
+            let _ = synth_worker(
+                backend.as_mut(),
+                g2p,
+                pre_pass.as_mut(),
+                &plan,
+                &audio_tx,
+                &event_tx,
+            );
         });
 
         Ok(StreamingSynthesis {
@@ -291,6 +355,7 @@ fn push_or_attach(plan: &mut Vec<PlanItem>, marks: Vec<String>) {
 fn synth_worker<G: TokenPhonemizer>(
     model: &mut dyn VoiceBackend,
     g2p: &mut G,
+    mut pre_pass: Option<&mut Box<dyn DocumentPhonemizer>>,
     plan: &[PlanItem],
     audio_tx: &mpsc::Sender<AudioChunk>,
     event_tx: &mpsc::Sender<SynthesisEvent>,
@@ -351,6 +416,14 @@ fn synth_worker<G: TokenPhonemizer>(
                 rate: unit_rate,
                 marks,
             } => {
+                let mut owned: Vec<WordSpan>;
+                let words: &[WordSpan] = if let Some(pp) = pre_pass.as_mut() {
+                    owned = words.clone();
+                    pp.assign_phonemes(&mut owned);
+                    &owned
+                } else {
+                    words.as_slice()
+                };
                 if words.is_empty() {
                     // Marks with no following speech fire at current offset.
                     for name in marks {
@@ -445,6 +518,50 @@ fn synth_worker<G: TokenPhonemizer>(
     Ok(())
 }
 
+/// Resolve a phoneme symbol against a model's id map, splitting
+/// compounds the map doesn't carry.
+///
+/// Lexicons and G2P engines emit composed symbols (`oʊ`, `aɪ`, `ɜː`,
+/// `t͡ʃ`); espeak-style inventories (all piper/MMS/kokoro voices) spell
+/// them as separate symbols instead. Without this, unknown symbols were
+/// silently dropped — 20% of symbols on a `CMUDict` lexicon sample, deleting
+/// whole diphthongs. Resolution order:
+///
+/// 1. direct hit;
+/// 2. substitution table for precomposed stragglers (`ɝ` → `ɜ` + `˞`);
+/// 3. per-character split (combining length marks and modifiers resolve
+///    as their own symbols; tie bars are skipped).
+///
+/// Returns empty when nothing resolves — the symbol is dropped, as before,
+/// but only when it truly has no representation in the voice.
+/// Precomposed symbols espeak-style inventories spell differently.
+const SUBST: &[(&str, &str)] = &[("ɝ", "ɜ˞")];
+
+fn resolve_phoneme_ids<'a>(map: &'a HashMap<String, Vec<i64>>, sym: &str) -> Vec<&'a Vec<i64>> {
+    if let Some(ids) = map.get(sym) {
+        return vec![ids];
+    }
+    for (from, to) in SUBST {
+        if sym == *from {
+            return to
+                .chars()
+                .filter_map(|c| map.get(c.encode_utf8(&mut [0u8; 4])))
+                .collect();
+        }
+    }
+    let mut out = Vec::new();
+    for ch in sym.chars() {
+        if matches!(ch, '\u{0361}' | '\u{035C}') {
+            continue; // tie bars: the parts carry the phoneme
+        }
+        match map.get(ch.encode_utf8(&mut [0u8; 4])) {
+            Some(ids) => out.push(ids),
+            None => return Vec::new(),
+        }
+    }
+    out
+}
+
 /// Build the phoneme-id sequence for a word run.
 ///
 /// Layout follows `framing`: piper-style `BOS, PAD, (phoneme ids…, PAD)*,
@@ -484,7 +601,7 @@ fn build_ids<G: TokenPhonemizer>(
         };
         let start = ids.len();
         for p in &phonemes {
-            if let Some(pid) = map.get(p.as_str()) {
+            for pid in resolve_phoneme_ids(map, p) {
                 ids.extend_from_slice(pid);
                 if let Some(p2) = pad {
                     ids.extend_from_slice(p2);
@@ -571,6 +688,124 @@ mod tests {
             .count();
         // default | fast | back to default
         assert_eq!(word_items, 3);
+    }
+
+    #[test]
+    fn resolve_splits_compound_symbols() {
+        // espeak-style inventory: single chars + modifiers only.
+        let m: HashMap<String, Vec<i64>> = [
+            ("o", vec![7]),
+            ("ʊ", vec![8]),
+            ("a", vec![9]),
+            ("ɪ", vec![10]),
+            ("ɜ", vec![11]),
+            ("˞", vec![12]),
+            ("ː", vec![13]),
+            ("ʃ", vec![14]),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let ids = |v: Vec<&Vec<i64>>| v.into_iter().flatten().copied().collect::<Vec<i64>>();
+        assert_eq!(ids(resolve_phoneme_ids(&m, "oʊ")), vec![7, 8]); // diphthong split
+        assert_eq!(ids(resolve_phoneme_ids(&m, "aɪ")), vec![9, 10]);
+        assert_eq!(ids(resolve_phoneme_ids(&m, "ɝ")), vec![11, 12]); // substitution
+        assert_eq!(ids(resolve_phoneme_ids(&m, "ɜː")), vec![11, 13]); // length mark
+        assert!(resolve_phoneme_ids(&m, "x").is_empty()); // truly unknown
+    }
+
+    /// Fake backend for worker-pipeline tests: silence audio with
+    /// per-id durations.
+    struct FakeBackend {
+        resolved: ResolvedConfig,
+    }
+
+    impl FakeBackend {
+        fn new(phoneme_map: HashMap<String, Vec<i64>>) -> Self {
+            Self {
+                resolved: ResolvedConfig {
+                    sample_rate: 16_000,
+                    hop_length: 256,
+                    phoneme_id_map: phoneme_map,
+                    noise_scale: 0.667,
+                    length_scale: 1.0,
+                    noise_scale_w: 0.8,
+                    speaker_id: None,
+                    has_durations: true,
+                    uses_scales: false,
+                    framing: ControlSymbols::piper(),
+                },
+            }
+        }
+    }
+
+    impl crate::backends::VoiceBackend for FakeBackend {
+        fn config(&self) -> &ResolvedConfig {
+            &self.resolved
+        }
+
+        fn run(
+            &mut self,
+            ids: &[i64],
+            _length_scale: f32,
+        ) -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)> {
+            let d = vec![10_i64; ids.len()];
+            let n = usize::try_from(d.iter().sum::<i64>()).unwrap_or(0) * 256;
+            Ok((vec![0.0; n], Some(d)))
+        }
+    }
+
+    #[test]
+    fn pre_pass_assigns_phonemes_before_the_chain() {
+        // Pre-pass assigns "h" (id 4 in the test map); the per-word chain
+        // would return "chain" (not in the map → all symbols dropped →
+        // no audio). If measured word events arrive, the pre-pass won.
+        struct Fixed;
+        impl super::DocumentPhonemizer for Fixed {
+            fn assign_phonemes(&mut self, words: &mut [WordSpan]) {
+                for w in words {
+                    w.phonemes = Some(vec!["h".into()]);
+                }
+            }
+        }
+        struct Chain;
+        impl floravox_g2p::TokenPhonemizer for Chain {
+            fn phonemize_token(&mut self, _t: &str) -> Vec<String> {
+                vec!["chain".into()]
+            }
+        }
+
+        let mut backend = FakeBackend::new(map());
+        let plan = plan_document(&map(), "hello world").unwrap();
+        let (audio_tx, audio_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut pre: Box<dyn DocumentPhonemizer> = Box::new(Fixed);
+        synth_worker(
+            &mut backend,
+            &mut Chain,
+            Some(&mut pre),
+            &plan,
+            &audio_tx,
+            &event_tx,
+        )
+        .unwrap();
+        drop(audio_tx);
+        drop(event_tx);
+        let events: Vec<_> = event_rx.iter().collect();
+        let words: Vec<&crate::WordTiming> = events
+            .iter()
+            .filter_map(|e| match e {
+                SynthesisEvent::WordBoundary(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(words.len(), 2, "pre-pass words did not synthesize");
+        assert!(words.iter().all(|w| !w.estimated));
+        let chunks: Vec<_> = audio_rx.iter().collect();
+        assert!(
+            !chunks.is_empty(),
+            "no audio: pre-pass symbols were dropped"
+        );
     }
 
     #[test]

@@ -9,12 +9,17 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
+default = ["misaki"]
 onnx = ["dep:ort"]
+# misaki G2P (the phonemizer Kokoro was trained with). MIT, fully
+# self-contained; the crate's espeak fallback is NOT enabled (GPL).
+misaki = ["dep:misaki-rs"]
 
 [dependencies]
 fst.workspace = true
 memmap2 = "0.9"
 ort = { workspace = true, optional = true }
+misaki-rs = { version = "0.3", default-features = false, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

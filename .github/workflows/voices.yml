@@ -21,6 +21,7 @@ jobs:
       PATCHED_MATCHA: ${{ github.workspace }}/models/matcha-icefall-en_US-ljspeech/model-patched.onnx
       PATCHED_MMS: ${{ github.workspace }}/models/vits-mms-fra/model-patched.onnx
       PATCHED_KOKORO: ${{ github.workspace }}/models/kokoro/model-patched.onnx
+      PATCHED_PIPER: ${{ github.workspace }}/models/piper-en_US-lessac-low/en_US-lessac-low-patched.onnx
     defaults:
       run:
         shell: bash
@@ -81,6 +82,18 @@ jobs:
             curl -sSL -o phonetisaurus.fst \
               https://media.githubusercontent.com/media/AdolfVonKleist/phonetisaurus-downloads/master/models/cmudict-20170708.o8.fst
           fi
+          # Piper voice (the original target family) + CMUDict source
+          if [ ! -d piper-en_US-lessac-low ]; then
+            mkdir -p piper-en_US-lessac-low
+            curl -sSL -o piper-en_US-lessac-low/en_US-lessac-low.onnx \
+              https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/low/en_US-lessac-low.onnx
+            curl -sSL -o piper-en_US-lessac-low/en_US-lessac-low.onnx.json \
+              https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/low/en_US-lessac-low.onnx.json
+          fi
+          if [ ! -f cmudict.dict ]; then
+            curl -sSL -o cmudict.dict \
+              https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict
+          fi
           ls -la "$MODELS"
 
       - name: Patch + validate duration surgery (all families)
@@ -93,6 +106,8 @@ jobs:
           python python/add_durations_output.py "$PATCHED_MMS" --validate
           cp "$MODELS/kokoro/model.int8.onnx" "$PATCHED_KOKORO"
           python python/add_durations_output.py "$PATCHED_KOKORO" --validate
+          cp "$MODELS/piper-en_US-lessac-low/en_US-lessac-low.onnx" "$PATCHED_PIPER"
+          python python/add_durations_output.py "$PATCHED_PIPER" --validate
 
       - name: Synthesize — matcha (measured word + mark events)
         run: |
@@ -128,6 +143,60 @@ jobs:
           assert len(words) == 3, f"expected 3 word events, got {len(words)}"
           assert all(not w["estimated"] for w in words), "mms timings must be measured"
           print("mms OK:", [(w["text"], w["ms_start"]) for w in words])
+          EOF
+
+      - name: Synthesize — kokoro (misaki plain text, break splice, rate)
+        run: |
+          set -euxo pipefail
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_KOKORO" --misaki us \
+            --text '<speak>Hello <mark name="k1"/>world, <break time="200ms"/>kokoro speaks plain text.</speak>' \
+            --out "$MODELS/out/kokoro.wav" --events "$MODELS/out/kokoro.json"
+          python - "$MODELS/out/kokoro.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = {e["text"]: e for e in evs if e["type"] == "word_boundary"}
+          assert "hello" in words and "world," in words, sorted(words)
+          assert all(not w["estimated"] for w in words.values()), "kokoro timings must be measured"
+          brk = next(e for e in evs if e["type"] == "break_started")
+          # the break splices exactly at the previous word's end
+          assert brk["sample"] == words["world,"]["sample_end"], (brk, words["world,"])
+          assert any(e["type"] == "mark_reached" and e.get("name") == "k1" for e in evs)
+          print("kokoro OK:", {k: (v["ms_start"], v["ms_end"]) for k, v in words.items()})
+          EOF
+          # rate control: prosody fast (1.25x) must produce audio and events
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_KOKORO" --misaki us \
+            --text '<speak><prosody rate="fast">hello world</prosody></speak>' \
+            --out "$MODELS/out/kokoro-fast.wav" --events "$MODELS/out/kokoro-fast.json"
+          python - "$MODELS/out/kokoro-fast.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          assert len(words) == 2, words
+          end = max(w["sample_end"] for w in words)
+          assert end > 0
+          print("kokoro rate OK: last sample", end)
+          EOF
+
+      - name: Synthesize — piper (lexicon stack + misaki, symbol-coverage fix)
+        run: |
+          set -euxo pipefail
+          cargo run -q -p floravox-g2p --bin floravox-fst-compile -- \
+            "$MODELS/cmudict.dict" "$MODELS/en_US"
+          cargo run -q -p floravox-cli -- synth \
+            --model "$PATCHED_PIPER" --lexicon "$MODELS/en_US" --misaki us \
+            --text '<speak>Hello world, the night voice test works.</speak>' \
+            --out "$MODELS/out/piper.wav" --events "$MODELS/out/piper.json"
+          python - "$MODELS/out/piper.json" <<'EOF'
+          import json, sys
+          evs = json.load(open(sys.argv[1]))
+          words = [e for e in evs if e["type"] == "word_boundary"]
+          texts = [w["text"] for w in words]
+          for expect in ["Hello", "world,", "night"]:
+              assert any(expect in t for t in texts), f"{expect} missing from {texts}"
+          assert all(not w["estimated"] for w in words), "piper timings must be measured"
+          print("piper OK:", [(w["text"], w["ms_start"]) for w in words])
           EOF
 
       - name: Synthesize — kokoro (phoneme overrides, break splice, rate)

@@ -9,10 +9,13 @@ keywords.workspace = true
 categories.workspace = true
 
 [features]
-default = ["onnx"]
+default = ["onnx", "misaki"]
 # ONNX inference via the `ort` crate. Disable for a frontend-only build
 # (timeline math, SSML, estimation fallback) with zero native deps.
 onnx = ["dep:ort", "dep:ndarray"]
+# Document-level misaki G2P pre-pass (the phonemizer Kokoro was trained
+# with). MIT and fully self-contained; adds ~9 MB of embedded dictionary.
+misaki = ["floravox-g2p/misaki"]
 
 [dependencies]
 floravox-ssml.workspace = true

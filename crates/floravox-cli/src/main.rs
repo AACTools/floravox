@@ -102,6 +102,7 @@ fn cmd_timeline(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_synth(args: &[String]) -> Result<()> {
     let mut model: Option<String> = None;
     let mut text: Option<String> = None;
@@ -110,6 +111,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
     let mut phonetisaurus_stem: Option<String> = None;
     let mut byt5_encoder: Option<String> = None;
     let mut byt5_decoder: Option<String> = None;
+    let mut misaki: Option<String> = None;
     let mut out_wav = "out.wav".to_string();
     let mut out_events = "events.json".to_string();
     let mut i = 0;
@@ -122,6 +124,15 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             "--phonetisaurus" => phonetisaurus_stem = args.get(i + 1).cloned(),
             "--byt5-encoder" => byt5_encoder = args.get(i + 1).cloned(),
             "--byt5-decoder" => byt5_decoder = args.get(i + 1).cloned(),
+            "--misaki" => {
+                let lang = args.get(i + 1).map(|s| s.to_ascii_lowercase());
+                match lang.as_deref() {
+                    Some("us" | "gb") | None => misaki.clone_from(&lang),
+                    Some(other) => bail!("--misaki takes us or gb, got {other:?}"),
+                }
+                i += if lang.is_some() { 2 } else { 1 };
+                continue;
+            }
             "--out" => out_wav = args.get(i + 1).cloned().unwrap_or(out_wav),
             "--events" => out_events = args.get(i + 1).cloned().unwrap_or(out_events),
             other => bail!("unknown synth flag {other:?}"),
@@ -155,7 +166,22 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             voice.config().phoneme_id_map.len(),
             voice.config().has_durations
         );
-        let synth = floravox_core::synth::Synthesizer::new(voice, cached);
+        let mut synth = floravox_core::synth::Synthesizer::new(voice, cached);
+        #[cfg(feature = "misaki")]
+        if misaki.is_some() {
+            let british = misaki.as_deref() == Some("gb");
+            synth = synth.with_document_phonemizer(Box::new(floravox_core::synth::MisakiPrePass(
+                floravox_g2p::MisakiG2p::new(british),
+            )));
+            println!(
+                "misaki: {} (document-level pre-pass)",
+                if british { "en-gb" } else { "en-us" }
+            );
+        }
+        #[cfg(not(feature = "misaki"))]
+        if misaki.is_some() {
+            bail!("floravox-cli was built without the misaki feature");
+        }
         let (samples, events, rate) = synth.synthesize(&input)?;
         write_wav(&out_wav, &samples, rate)?;
         let events_json: Vec<serde_json::Value> = events
@@ -190,6 +216,7 @@ fn cmd_synth(args: &[String]) -> Result<()> {
             input,
             out_wav,
             out_events,
+            misaki,
             lexicon_stem,
             phonetisaurus_stem,
             byt5_encoder,
