@@ -5,19 +5,35 @@ use floravox_core::synth::Synthesizer;
 use floravox_g2p::{CachedPhonemizer, LexiconPhonemizer, MmapLexicon, RuleFallback};
 
 fn rss_mb() -> f64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    for line in status.lines() {
-        if let Some(v) = line.strip_prefix("VmHWM:") {
-            return v
-                .trim()
-                .trim_end_matches("kB")
-                .trim()
-                .parse::<i64>()
-                .unwrap_or(0) as f64
-                / 1024.0;
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // No /proc on macOS: point-in-time RSS via ps (KB). Sampled after
+        // synthesis with the arena at its high-water mark, so it tracks
+        // the Linux VmHWM number closely in practice.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output();
+        out.ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .map_or(0.0, |kb| kb / 1024.0)
     }
-    0.0
+    #[cfg(not(target_os = "macos"))]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        for line in status.lines() {
+            if let Some(v) = line.strip_prefix("VmHWM:") {
+                return v
+                    .trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse::<i64>()
+                    .unwrap_or(0) as f64
+                    / 1024.0;
+            }
+        }
+        0.0
+    }
 }
 
 fn main() -> anyhow::Result<()> {
