@@ -113,6 +113,10 @@ pub struct SsmlDocument {
     /// Non-fatal issues encountered while parsing (unknown tags, malformed
     /// values, ...). Input is always parsed leniently.
     pub warnings: Vec<String>,
+    /// `xml:lang` from the `<speak>` envelope, when present. Documented
+    /// intent for the utterance's language; consumers use it for G2P/lexicon
+    /// routing. Not validated beyond UTF-8.
+    pub lang: Option<String>,
 }
 
 impl SsmlDocument {
@@ -495,6 +499,12 @@ fn handle_open(
         _ => {}
     }
     match name {
+        "speak" => {
+            // Envelope language: recorded for G2P/lexicon routing.
+            if let Some(lang) = attr(tag, "xml:lang") {
+                doc.lang = Some(lang);
+            }
+        }
         "break" => {
             let ms = attr(tag, "time")
                 .and_then(|t| parse_time(&t))
@@ -990,6 +1000,14 @@ fn parse_relative_percent(s: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speak_envelope_lang_is_recorded() {
+        let doc = parse(r#"<speak xml:lang="de-DE">Guten Tag</speak>"#).unwrap();
+        assert_eq!(doc.lang.as_deref(), Some("de-DE"));
+        assert!(parse("<speak>hi</speak>").unwrap().lang.is_none());
+        assert!(parse("plain").unwrap().lang.is_none());
+    }
 
     #[test]
     fn plain_text_words() {

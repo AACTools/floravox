@@ -241,9 +241,9 @@ dependencies = [
 
 [[package]]
 name = "floravox-capi"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
- "floravox-g2p 0.7.1",
+ "floravox-g2p 0.7.2",
  "memmap2",
  "tempfile",
  "voicegarden-lexicons",
@@ -251,21 +251,21 @@ dependencies = [
 
 [[package]]
 name = "floravox-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "floravox-core",
- "floravox-g2p 0.7.1",
+ "floravox-g2p 0.7.2",
  "floravox-ssml",
  "serde_json",
 ]
 
 [[package]]
 name = "floravox-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
- "floravox-g2p 0.7.1",
+ "floravox-g2p 0.7.2",
  "floravox-ssml",
  "ndarray 0.16.1",
  "ort",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "floravox-g2p"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "fst",
  "memmap2",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "floravox-ssml"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "quick-xml",
  "serde_json",

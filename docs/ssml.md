@@ -127,6 +127,14 @@ Recorded on word spans (per-word `voice` field). The synthesizer does
 not switch voices mid-utterance; the attribute is surfaced for wrapper
 layers that route utterances by voice.
 
+### `<speak xml:lang="...">`
+
+The envelope's `xml:lang` is recorded on the document and used for G2P
+routing by consumers (the rust-tts-wrapper floravox engine picks the
+voicegarden-lexicons bundle for that language when no explicit language
+is configured). It does not switch voices mid-document and is not
+validated beyond UTF-8.
+
 ### `<s>`, `<p>`
 
 Sentence and paragraph boundaries. Each emits a positional event, and —
