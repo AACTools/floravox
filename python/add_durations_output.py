@@ -14,10 +14,16 @@ Supported families (input/output names are discovered from the graph):
 * Matcha acoustic `x`/`x_length` + `noise_scale`/`length_scale`, out `mel`
                   (validate against mel frames; audio comes from a
                   separate vocoder)
+* Kokoro          `tokens`/`style`/`speed`, out `audio` — taps the
+                  StyleTTS2 duration predictor (`duration_proj → ... →
+                  Round`); invariant `sum(durations) * 600 == samples`
+                  (600 samples per duration unit at 24 kHz), exact across
+                  speeds and speakers.
 
-Semantics: durations[i] is the number of mel frames allocated to phoneme-id
-i of the input sequence (including pad ids). Convert to samples with
-`frame * hop_length` (default hop 256; check the voice's config).
+Semantics: durations[i] is the number of duration units allocated to
+phoneme-id i of the input sequence (including pad ids). Convert to
+samples with `frame * hop_length` (piper/MMS 256, matcha per vocoder,
+kokoro 600; check the voice's config).
 
 Based on the approach validated upstream in piper1-gpl
 (patch_voice_with_alignment.py), with two additions:
@@ -41,28 +47,44 @@ _LOGGER = logging.getLogger("floravox.patch")
 
 
 def find_duration_tensor(model) -> str:
-    """Locate the Ceil(w) tensor feeding the attention path.
+    """Locate the duration tensor feeding the attention/upsample path.
 
-    In piper/MMS VITS and Matcha exports the stochastic-duration-predictor
-    output is exponentiated, scaled, and Ceil'd; that tensor both drives
-    the CumSum attention builder and sums to the mel length. Matcha graphs
-    carry a second Ceil (a length computation), so when several Ceils
-    exist the one feeding a CumSum (generate_path) wins.
+    piper/MMS VITS and Matcha: the stochastic-duration-predictor output is
+    exponentiated, scaled, and Ceil'd; that tensor drives the CumSum
+    attention builder and sums to the mel length. Matcha graphs carry a
+    second Ceil (a length computation), so when several Ceils exist the
+    one feeding a CumSum (generate_path) wins.
+
+    Kokoro (StyleTTS2): no Ceil; the duration predictor is
+    `duration_proj/... → Sigmoid → ReduceSum → Div → Squeeze → Round`,
+    whose output drives the per-token frame split. The Round fed by
+    `duration_proj` ancestry is tapped.
     """
     ceil_outputs = [o for node in model.graph.node if node.op_type == "Ceil" for o in node.output]
-    if not ceil_outputs:
-        raise ValueError(
-            "No Ceil node found — this does not look like a piper/mms VITS "
-            "or Matcha export."
-        )
-    if len(ceil_outputs) > 1:
-        # Prefer a Ceil whose value feeds a CumSum (generate_path).
-        graph_input_names = {i for n in model.graph.node for i in n.input}
-        for cand in ceil_outputs:
-            if cand in graph_input_names:
-                return cand
-        raise ValueError(f"Multiple Ceil nodes, none feed CumSum: {ceil_outputs}")
-    return ceil_outputs[0]
+    if ceil_outputs:
+        if len(ceil_outputs) > 1:
+            # Prefer a Ceil whose value feeds a CumSum (generate_path).
+            graph_input_names = {i for n in model.graph.node for i in n.input}
+            for cand in ceil_outputs:
+                if cand in graph_input_names:
+                    return cand
+            raise ValueError(f"Multiple Ceil nodes, none feed CumSum: {ceil_outputs}")
+        return ceil_outputs[0]
+
+    producers = {o: n for n in model.graph.node for o in n.output}
+    for node in model.graph.node:
+        if node.op_type != "Round":
+            continue
+        cur, depth = node, 0
+        while cur is not None and depth < 20:
+            if "duration_proj" in (cur.name or ""):
+                return node.output[0]
+            cur = producers.get(cur.input[0]) if cur.input else None
+            depth += 1
+    raise ValueError(
+        "No duration tensor found — this does not look like a piper/mms "
+        "VITS, Matcha, or Kokoro export."
+    )
 
 
 def add_durations_output(model, tensor_name: str) -> str:
@@ -87,9 +109,25 @@ def add_durations_output(model, tensor_name: str) -> str:
     return tensor_name
 
 
+def model_type(model_path: Path) -> str:
+    """Read `model_type` from embedded ONNX metadata ("" when absent)."""
+    import onnx
+
+    try:
+        m = onnx.load(str(model_path), load_external_data=False)
+    except Exception:  # noqa: BLE001 - metadata is best-effort
+        return ""
+    for p in m.metadata_props:
+        if p.key == "model_type":
+            return p.value
+    return ""
+
+
 def load_hop(model_path: Path, override: int | None) -> int:
     if override is not None:
         return override
+    if model_type(model_path) == "kokoro":
+        return 600  # empirically exact at 24 kHz across speeds/speakers
     # piper voice config
     cfg = model_path.with_suffix(".onnx.json")
     if cfg.exists():
@@ -141,8 +179,9 @@ def load_symbol_map(model_path: Path) -> dict[str, list[int]]:
 
 def validate(model_path: Path, hop: int) -> bool:
     """Run the patched model on a synthetic id sequence and check the
-    frame invariant: sum(durations) * hop == audio samples (VITS), or
-    sum(durations) == mel frames (Matcha, whose audio needs a vocoder)."""
+    frame invariant: sum(durations) * hop == audio samples (VITS, Kokoro),
+    or sum(durations) == mel frames (Matcha, whose audio needs a
+    vocoder)."""
     import numpy as np
     import onnxruntime as ort
 
@@ -150,22 +189,27 @@ def validate(model_path: Path, hop: int) -> bool:
     input_names = [i.name for i in session.get_inputs()]
     output_names = [o.name for o in session.get_outputs()]
     is_matcha = "mel" in output_names
+    is_kokoro = "tokens" in input_names and "style" in input_names
 
     phoneme_map = load_symbol_map(model_path)
     pad = phoneme_map.get("_", [0])[0]
     bos = phoneme_map.get("^", [1])[0]
     eos = phoneme_map.get("$", [2])[0]
-    ids = [bos, pad]
-    for symbol in "hello world":
-        for pid in phoneme_map.get(symbol, []):
-            ids.append(pid)
-            ids.append(pad)
-    ids.append(eos)
+    if is_kokoro:
+        # Char-level tokens, no control framing.
+        ids = [phoneme_map[c][0] for c in "hello world." if c in phoneme_map]
+    else:
+        ids = [bos, pad]
+        for symbol in "hello world":
+            for pid in phoneme_map.get(symbol, []):
+                ids.append(pid)
+                ids.append(pad)
+        ids.append(eos)
     ids = np.asarray([ids], dtype=np.int64)
 
     feeds: dict = {}
     for name in input_names:
-        if name in ("input", "x"):
+        if name in ("input", "x", "tokens"):
             feeds[name] = ids
         elif name in ("input_lengths", "x_length"):
             feeds[name] = np.asarray([ids.shape[1]], dtype=np.int64)
@@ -179,11 +223,18 @@ def validate(model_path: Path, hop: int) -> bool:
             feeds[name] = np.asarray([0.8], dtype=np.float32)
         elif name == "sid":
             feeds[name] = np.asarray([0], dtype=np.int64)
+        elif name == "style":
+            feeds[name] = kokoro_style(model_path.parent, ids.shape[1], 0)
+        elif name == "speed":
+            feeds[name] = np.asarray([1.0], dtype=np.float32)
         else:
             _LOGGER.warning("unknown input %r fed with zeros", name)
             feeds[name] = np.zeros(1, dtype=np.float32)
 
-    main_out = "mel" if is_matcha else ("y" if "y" in output_names else "output")
+    main_out = (
+        "mel" if is_matcha else "audio" if "audio" in output_names
+        else "y" if "y" in output_names else "output"
+    )
     results = session.run([main_out, "durations"], feeds)
     main, durations = results[0], results[1]
     frames = int(durations.reshape(-1).sum())
@@ -204,6 +255,17 @@ def validate(model_path: Path, hop: int) -> bool:
             frames, hop, predicted, audio_len, "OK" if ok else "MISMATCH",
         )
     return ok
+
+
+def kokoro_style(model_dir: Path, tokens_len: int, sid: int):
+    """Length-conditioned style slice from a sibling `voices.bin`
+    (`styles[sid][min(len, dim0-1)]`, sherpa-onnx semantics)."""
+    import numpy as np
+
+    voices = np.fromfile(model_dir / "voices.bin", dtype=np.float32)
+    dim0, dim2 = 511, 256  # style_dim; see ONNX metadata for other exports
+    off = (sid * dim0 + min(tokens_len, dim0 - 1)) * dim2
+    return voices[off:off + dim2].reshape(1, dim2).astype(np.float32)
 
 
 def main() -> int:

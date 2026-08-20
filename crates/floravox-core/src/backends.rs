@@ -4,12 +4,15 @@
 //! |---|---|---|---|
 //! | [`VitsBackend`] | piper VITS, MMS VITS | end-to-end | `sum(d) × hop == samples` |
 //! | [`MatchaBackend`] | Matcha acoustic + HiFi-GAN/vocos vocoder | mel → vocoder | `sum(d) == mel frames` |
+//! | [`KokoroBackend`] | Kokoro (`StyleTTS2`) | end-to-end | `sum(d) × 600 == samples` |
 //!
 //! Input/output tensor names are discovered at load time, so a single
 //! backend drives the whole family: piper exports call the id input
 //! `input`/`input_lengths` (old exports take one `scales` tensor), MMS
 //! calls them `x`/`x_length`, Matcha takes `x`/`x_length` with two
-//! scales and outputs `mel` instead of waveform.
+//! scales and outputs `mel` instead of waveform, and Kokoro takes
+//! `tokens`/`style`/`speed` with the style sliced from a sibling
+//! `voices.bin` (length-conditioned, sherpa-onnx semantics).
 //!
 //! Vocoder models for Matcha are found beside the acoustic model
 //! (`*.onnx` sibling matching `hifigan`/`vocos`/`vocoder`, or a
@@ -17,7 +20,7 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
-use crate::synth::ResolvedConfig;
+use crate::synth::{ControlSymbols, ResolvedConfig};
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -76,6 +79,23 @@ pub struct MatchaBackend {
     vocoder_audio_name: String,
 }
 
+/// Kokoro (StyleTTS2): char-level tokens, length-conditioned style
+/// vectors from a sibling `voices.bin`, native `speed` rate control.
+pub struct KokoroBackend {
+    session: ort::session::Session,
+    pub(crate) config: ResolvedConfig,
+    /// The whole `voices.bin` bank (`num_speakers × dim0 × dim2` floats).
+    voices: Vec<f32>,
+    /// `style_dim[0]` from metadata (511 in current exports).
+    style_dim0: usize,
+    /// `style_dim[2]` from metadata (256).
+    style_dim2: usize,
+}
+
+/// Samples per kokoro duration unit — empirically exact at 24 kHz across
+/// speeds, speakers, and lengths.
+const KOKORO_HOP: u32 = 600;
+
 /// Names collected from a session at load time.
 #[derive(Default)]
 struct GraphNames {
@@ -117,6 +137,10 @@ pub fn load_voice(path: impl AsRef<Path>) -> anyhow::Result<Box<dyn VoiceBackend
     let names = GraphNames::of(&session);
 
     let sidecar = SidecarConfig::load(&onnx);
+
+    if names.has("tokens") && names.has("style") && names.has("speed") {
+        return Ok(Box::new(KokoroBackend::build(session, &onnx, &sidecar)?));
+    }
 
     if names.has("mel") && names.has("x") && names.has("x_length") {
         let vocoder_path = sidecar
@@ -304,6 +328,168 @@ fn num_speakers(session: &ort::session::Session) -> u32 {
         .unwrap_or(0)
 }
 
+impl KokoroBackend {
+    fn build(
+        session: ort::session::Session,
+        onnx: &Path,
+        sidecar: &SidecarConfig,
+    ) -> anyhow::Result<Self> {
+        let dir = onnx.parent().unwrap_or(Path::new("."));
+        let map = sidecar
+            .phoneme_id_map
+            .clone()
+            .or_else(|| tokens_txt_map(&dir.join("tokens.txt")))
+            .ok_or_else(|| {
+                anyhow!(
+                    "kokoro voice {} needs a tokens.txt (or a sidecar phoneme_id_map)",
+                    onnx.display()
+                )
+            })?;
+        let voices_path = dir.join("voices.bin");
+        let voices = std::fs::read(&voices_path)
+            .with_context(|| format!("reading {}", voices_path.display()))?;
+        let voices = {
+            let mut floats = Vec::with_capacity(voices.len() / 4);
+            for chunk in voices.chunks_exact(4) {
+                floats.push(f32::from_le_bytes(chunk.try_into().expect("4 bytes")));
+            }
+            floats
+        };
+
+        // style_dim metadata: "511,1,256"
+        let (style_dim0, style_dim2) = session_metadata(&session, "style_dim")
+            .and_then(|s| parse_style_dim(&s))
+            .unwrap_or((511, 256));
+        let speakers = session_metadata(&session, "n_speakers")
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1);
+        if voices.len() % (style_dim0 * style_dim2) != 0 {
+            return Err(anyhow!(
+                "voices.bin size {} does not divide into {}×{} style slots",
+                voices.len(),
+                style_dim0,
+                style_dim2
+            ));
+        }
+
+        let names = GraphNames::of(&session);
+        let sample_rate = sidecar
+            .sample_rate
+            .or_else(|| {
+                session_metadata(&session, "sample_rate")
+                    .and_then(|v| v.parse().ok())
+            })
+            .unwrap_or(24_000);
+        let hop_length = sidecar.hop_length.unwrap_or(KOKORO_HOP);
+
+        let config = ResolvedConfig {
+            sample_rate,
+            hop_length,
+            phoneme_id_map: map,
+            noise_scale: 0.667,
+            length_scale: 1.0,
+            noise_scale_w: 0.8,
+            speaker_id: (speakers > 1).then_some(0),
+            has_durations: names.has("durations"),
+            uses_scales: false,
+            framing: ControlSymbols::kokoro(),
+        };
+        Ok(Self {
+            session,
+            config,
+            voices,
+            style_dim0,
+            style_dim2,
+        })
+    }
+
+}
+
+/// Length-conditioned style slice: `voices[(sid·dim0 + min(len,
+/// dim0-1))·dim2 ..]` (sherpa-onnx semantics — the style bank is indexed
+/// by input length as well as speaker).
+fn kokoro_style_slice(
+    voices: &[f32],
+    style_dim0: usize,
+    style_dim2: usize,
+    sid: usize,
+    tokens_len: usize,
+) -> Option<&[f32]> {
+    let row = sid * style_dim0 + tokens_len.min(style_dim0.saturating_sub(1));
+    voices.get(row * style_dim2..(row + 1) * style_dim2)
+}
+
+/// Parse `style_dim` metadata ("511,1,256") into `(dim0, dim2)`.
+fn parse_style_dim(s: &str) -> Option<(usize, usize)> {
+    let mut parts = s.split(',');
+    let dim0 = parts.next()?.trim().parse().ok()?;
+    let _dim1 = parts.next()?.trim().parse::<usize>().ok()?;
+    let dim2 = parts.next()?.trim().parse().ok()?;
+    parts.next().is_none().then_some((dim0, dim2))
+}
+
+impl VoiceBackend for KokoroBackend {
+    fn config(&self) -> &ResolvedConfig {
+        &self.config
+    }
+
+    fn run(
+        &mut self,
+        ids: &[i64],
+        length_scale: f32,
+    ) -> anyhow::Result<(Vec<f32>, Option<Vec<i64>>)> {
+        // VITS semantics: durations ∝ length_scale. Kokoro's `speed`
+        // divides durations, so speed = 1/length_scale keeps the trait's
+        // contract (rate 2 → worker passes 1.0/2 → speed 2 → 2× faster).
+        let speed = (1.0 / length_scale.max(0.1)).clamp(0.1, 10.0);
+        let sid = usize::try_from(self.config.speaker_id.unwrap_or(0)).unwrap_or(0);
+        let style = kokoro_style_slice(
+            &self.voices,
+            self.style_dim0,
+            self.style_dim2,
+            sid,
+            ids.len(),
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "voices.bin holds {} speakers; style slot {sid} out of range",
+                self.voices.len() / (self.style_dim0 * self.style_dim2)
+            )
+        })?;
+
+        let seq = i64::try_from(ids.len()).unwrap_or(i64::MAX);
+        let tokens = ort::value::Tensor::from_array(([1_i64, seq], ids.to_vec()))?;
+        let style_tensor =
+            ort::value::Tensor::from_array((
+                vec![1_i64, i64::try_from(self.style_dim2).unwrap_or(256)],
+                style.to_vec(),
+            ))?;
+        let speed_tensor = ort::value::Tensor::from_array(([1_i64], vec![speed]))?;
+
+        let outputs = self.session.run(ort::inputs![
+            "tokens" => tokens,
+            "style" => style_tensor,
+            "speed" => speed_tensor
+        ])?;
+
+        let mut audio: Vec<f32> = Vec::new();
+        let mut durations: Option<Vec<i64>> = None;
+        for (name, output) in &outputs {
+            if name == "audio" {
+                let view = output.try_extract_tensor::<f32>()?;
+                audio = view.1.to_vec();
+            } else if name == "durations" {
+                let view = output.try_extract_tensor::<f32>()?;
+                durations = Some(view.1.iter().map(|&f| f.round() as i64).collect());
+            }
+        }
+        if audio.is_empty() {
+            return Err(anyhow!("kokoro model produced no audio output"));
+        }
+        Ok((audio, durations))
+    }
+}
+
 impl VitsBackend {
     fn build(
         session: ort::session::Session,
@@ -357,6 +543,7 @@ impl VitsBackend {
             speaker_id: (speakers > 1).then_some(0),
             has_durations,
             uses_scales,
+            framing: ControlSymbols::piper(),
         };
         Ok(Self {
             session,
@@ -502,6 +689,7 @@ impl MatchaBackend {
             speaker_id: (speakers > 1).then_some(0),
             has_durations: anames.has("durations"),
             uses_scales: false,
+            framing: ControlSymbols::piper(),
         };
         Ok(Self {
             acoustic,
@@ -608,5 +796,30 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("v.onnx"), b"x").unwrap();
         assert_eq!(resolve_onnx(&sub).unwrap(), sub.join("v.onnx"));
+    }
+
+    #[test]
+    fn style_dim_metadata_parses() {
+        assert_eq!(parse_style_dim("511,1,256"), Some((511, 256)));
+        assert_eq!(parse_style_dim(" 300 , 1 , 128 "), Some((300, 128)));
+        assert_eq!(parse_style_dim("511,1"), None);
+        assert_eq!(parse_style_dim("511,1,256,9"), None);
+        assert_eq!(parse_style_dim("abc"), None);
+    }
+
+    #[test]
+    fn style_slice_is_length_conditioned() {
+        // 2 speakers × dim0=3 × dim2=2, values = flat row index.
+#[allow(clippy::cast_precision_loss)]
+        let voices: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        // sid 0, len 0 → row 0 → [0, 1]; len 2 → row 2 → [4, 5]
+        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 0), Some(&[0.0, 1.0][..]));
+        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 2), Some(&[4.0, 5.0][..]));
+        // len clamps to dim0-1
+        assert_eq!(kokoro_style_slice(&voices, 3, 2, 0, 99), Some(&[4.0, 5.0][..]));
+        // sid 1, len 1 → row 4 → [8, 9]
+        assert_eq!(kokoro_style_slice(&voices, 3, 2, 1, 1), Some(&[8.0, 9.0][..]));
+        // sid out of range → None
+        assert_eq!(kokoro_style_slice(&voices, 3, 2, 2, 0), None);
     }
 }

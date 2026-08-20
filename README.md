@@ -20,7 +20,12 @@ floravox gives neural TTS the two things edge deployments usually lack:
 | piper VITS | `X.onnx` + `X.onnx.json` | yes (patched) | the original target |
 | MMS VITS | `X.onnx` + `tokens.txt` (+ `config.json`) | yes (patched) | tensor names + config auto-detected |
 | Matcha | acoustic `*.onnx` + `tokens.txt` + vocoder (`hifigan*`/`vocos*`) | yes (patched acoustic) | `sum(durations) == mel frames`, audio via vocoder |
-| kokoro / zipvoice | — | — | not wired (kokoro's per-token durations are tappable; zipvoice is prompt-conditioned flow matching) |
+| Kokoro | `model.onnx` + `tokens.txt` + `voices.bin` | yes (patched) | StyleTTS2; `sum(durations) × 600 == samples`, native `speed` rate control, length-conditioned style bank (`speaker × len` slices), 11 voices per en-v0.19 via `voices.bin` slots |
+| zipvoice | — | — | not wired (prompt-conditioned flow matching; its only Ceil is clone-prompt alignment) |
+
+Kokoro's phoneme alphabet is the misaki/espeak character set — until a
+misaki-compatible G2P lands, drive it with SSML `<phoneme>` overrides
+(one symbol per character).
 
 Family, tensor naming, sample rate, and hop are discovered at load time
 (graph inputs, sibling `tokens.txt`/`config.json`, embedded ONNX metadata,
@@ -37,6 +42,8 @@ tapping the duration predictor's Ceil tensor into a stable
 ```
 sum(durations) × hop_length == audio samples   (VITS, validated exactly)
 sum(durations) == mel frames                   (Matcha, audio via vocoder)
+sum(durations) × 600 == audio samples          (Kokoro, exact across
+                                                speeds and speakers)
 ```
 
 The Rust side folds those per-phoneme-id durations back onto word spans:
@@ -179,9 +186,9 @@ Dispatcher index-mark recipe.
 - [x] Phonetisaurus WFST OOV fallback (clean-room OpenFst reader +
       shortest-path decode, no `ort` dependency; validated against a
       1M-state CMUDict model)
-- [x] Multi-family voices: `VoiceBackend` trait with piper/MMS VITS and
-      Matcha+vocoder backends (family, tensor names, config auto-detected;
-      both validated live with measured timings)
+- [x] Multi-family voices: `VoiceBackend` trait with piper/MMS VITS,
+      Matcha+vocoder, and Kokoro backends (family, tensor names, config
+      auto-detected; all validated live with measured timings)
 - [ ] rust-tts-wrapper engine adapter (`floravox-engine` branch)
 - [ ] VoiceGarden-SPD module integration
 

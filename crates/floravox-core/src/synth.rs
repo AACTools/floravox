@@ -26,6 +26,49 @@ const BOS: &str = "^";
 const EOS: &str = "$";
 const PAD: &str = "_";
 
+/// Sequence framing a model family expects around the phoneme ids.
+///
+/// VITS exports (piper, MMS) and Matcha use piper's layout:
+/// `BOS, PAD, (ids…, PAD)*, EOS` with `space, PAD` between words. Kokoro
+/// is char-level with none of that: bare tokens with `space` between
+/// words.
+#[derive(Debug, Clone, Default)]
+pub struct ControlSymbols {
+    /// Start-of-sequence symbol (piper `^`).
+    pub bos: Option<String>,
+    /// End-of-sequence symbol (piper `$`).
+    pub eos: Option<String>,
+    /// Interleaved pad symbol (piper `_`).
+    pub pad: Option<String>,
+    /// Word separator symbol (piper/kokoro ` `).
+    pub space: Option<String>,
+}
+
+impl ControlSymbols {
+    /// Piper-style framing (`^`, `$`, `_`, ` `); `build_ids` skips any
+    /// symbol missing from the model's map (MMS has no `^`/`$`/space).
+    #[must_use]
+    pub fn piper() -> Self {
+        Self {
+            bos: Some(BOS.into()),
+            eos: Some(EOS.into()),
+            pad: Some(PAD.into()),
+            space: Some(" ".into()),
+        }
+    }
+
+    /// Kokoro framing: no control wrapping, spaces between words.
+    #[must_use]
+    pub fn kokoro() -> Self {
+        Self {
+            bos: None,
+            eos: None,
+            pad: None,
+            space: Some(" ".into()),
+        }
+    }
+}
+
 /// Fully-resolved voice parameters.
 #[derive(Debug, Clone)]
 pub struct ResolvedConfig {
@@ -48,6 +91,8 @@ pub struct ResolvedConfig {
     /// Old piper exports take one `[noise_scale, length_scale, noise_scale_w]`
     /// tensor named `scales`; newer ones take three separate inputs.
     pub uses_scales: bool,
+    /// Sequence framing (control symbols) the family expects.
+    pub framing: ControlSymbols,
 }
 
 
@@ -321,7 +366,12 @@ fn synth_worker<G: TokenPhonemizer>(
                     continue;
                 }
 
-                let (ids, groups) = build_ids(&model.config().phoneme_id_map.clone(), g2p, words);
+                let (ids, groups) = build_ids(
+                    &model.config().phoneme_id_map,
+                    &model.config().framing,
+                    g2p,
+                    words,
+                );
                 if ids.is_empty() {
                     continue;
                 }
@@ -398,19 +448,20 @@ fn synth_worker<G: TokenPhonemizer>(
 
 /// Build the phoneme-id sequence for a word run.
 ///
-/// Piper-style layout: `BOS, PAD, (phoneme ids…, PAD)*, EOS`, with
-/// `space, PAD` between words. Control symbols missing from the map
-/// (MMS alphabets have no `^`/`$`/space) are skipped instead of guessed,
-/// so those models get a flat id sequence.
+/// Layout follows `framing`: piper-style `BOS, PAD, (phoneme ids…, PAD)*,
+/// EOS` with `space, PAD` between words; kokoro-style bare tokens with
+/// `space` between words. Control symbols missing from the map are
+/// skipped instead of guessed.
 fn build_ids<G: TokenPhonemizer>(
     map: &HashMap<String, Vec<i64>>,
+    framing: &ControlSymbols,
     g2p: &mut G,
     words: &[WordSpan],
 ) -> (Vec<i64>, Vec<std::ops::Range<usize>>) {
-    let pad = map.get(PAD);
-    let bos = map.get(BOS);
-    let eos = map.get(EOS);
-    let space = map.get(" ");
+    let pad = framing.pad.as_deref().and_then(|s| map.get(s));
+    let bos = framing.bos.as_deref().and_then(|s| map.get(s));
+    let eos = framing.eos.as_deref().and_then(|s| map.get(s));
+    let space = framing.space.as_deref().and_then(|s| map.get(s));
 
     let mut ids: Vec<i64> = Vec::new();
     ids.extend_from_slice(bos.unwrap_or(&Vec::new()));
@@ -546,7 +597,7 @@ mod tests {
             })
             .collect();
         let mut g2p = Fixed;
-        let (ids, groups) = build_ids(&m, &mut g2p, &words);
+        let (ids, groups) = build_ids(&m, &ControlSymbols::piper(), &mut g2p, &words);
         // BOS PAD | h PAD ɛ PAD l PAD o PAD | space PAD | w PAD ɜː PAD l PAD d PAD | EOS
         assert_eq!(ids.len(), 2 + 8 + 2 + 8 + 1);
         assert_eq!(ids[0], 1); // BOS
