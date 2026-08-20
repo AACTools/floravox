@@ -259,7 +259,28 @@ struct SidecarConfig {
 
 impl SidecarConfig {
     fn load(onnx: &Path) -> Self {
-        let path = onnx.with_extension("onnx.json");
+        // Exact stem match first; patched models (voice-patched.onnx
+        // beside voice.onnx.json) fall back to the unique sibling json.
+        let mut path = onnx.with_extension("onnx.json");
+        if !path.exists() {
+            if let Some(dir) = onnx.parent() {
+                let mut sidecars: Vec<PathBuf> = std::fs::read_dir(dir)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension().and_then(|e| e.to_str()) == Some("json")
+                            && p.file_stem()
+                                .and_then(|s| s.to_str())
+                                .is_some_and(|s| s.ends_with(".onnx"))
+                    })
+                    .collect();
+                if sidecars.len() == 1 {
+                    path = sidecars.pop().expect("one entry");
+                }
+            }
+        }
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
